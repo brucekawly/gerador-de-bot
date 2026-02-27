@@ -8,6 +8,14 @@ O **Gerador de BOT** é uma solução avançada de automação desenvolvida em P
 
 ---
 
+## 📸 Demonstração da Interface
+
+![Gerador de BOT Interface](screenshot.png)
+
+*Interface moderna em modo Dark, com controle de RAM, scanner de rede e monitoramento de execução em tempo real.*
+
+---
+
 ## � Download do Executável
 
 Para usuários que desejam apenas utilizar a ferramenta sem configurar o ambiente de desenvolvimento, baixe a versão estável pronta para uso:
