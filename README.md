@@ -1,93 +1,77 @@
-# 🤖 Gerador de BOT - Automação de Roteadores & ONTs
+# 🤖 Gerador de BOT - Automação Profissional de Roteadores & ONTs
 
-O **Gerador de BOT** é uma ferramenta robusta desenvolvida em Python para simplificar o provisionamento massivo de roteadores e ONTs (Optical Network Terminals). Através de uma interface moderna e intuitiva, você pode "ensinar" o sistema a configurar qualquer equipamento e replicar essa configuração em centenas de dispositivos automaticamente.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python v3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
+[![Playwright](https://img.shields.io/badge/Playwright-v1.41-green.svg)](https://playwright.dev/)
 
----
-
-## 🔥 Por que usar o Gerador de BOT?
-
-Em cenários de migração de tecnologia ou alteração de servidores (como TR-069), a configuração manual terminal a terminal é lenta e propensa a erros humanos. Este projeto resolve esse problema unindo a facilidade de uma interface visual com o poder do **Playwright** para automação web de ultra performance.
+O **Gerador de BOT** é uma solução avançada de automação desenvolvida em Python, projetada especificamente para o setor de telecomunicações. Esta ferramenta permite a configuração massiva e rápida de dispositivos de rede, eliminando o erro humano e reduzindo drasticamente o tempo de provisionamento em campo ou em laboratório.
 
 ---
 
-## 🚀 Funcionalidades Principais
+## � Download do Executável
 
-### 1. 🎥 Gravador de Macros Inteligente
-*   **Sem Código:** Clique em "Gravar Ações" e configure o roteador no navegador que abrirá. O sistema captura seus cliques, preenchimentos de formulários e salvamentos.
-*   **Limpeza Automática:** O robô remove redundâncias do script gravado para garantir uma execução limpa.
-*   **Variáveis Dinâmicas:** Substituição automática de IP, Porta, Usuário e Senha por variáveis `{{IP}}`, `{{PORT}}`, permitindo o uso do mesmo template para todo o seu parque de equipamentos.
+Para usuários que desejam apenas utilizar a ferramenta sem configurar o ambiente de desenvolvimento, baixe a versão estável pronta para uso:
 
-### 2. ⚡ Scanner de Rede Integrado
-*   **Filtro de Ativos:** Antes de iniciar a automação, escaneie a sua faixa de IPs.
-*   **Performance:** Utiliza múltiplas threads para testar a porta web (80/443) de centenas de IPs simultaneamente.
-*   **Fila Inteligente:** Adiciona apenas os dispositivos que estão realmente online à fila de execução, economizando tempo precioso.
-
-### 3. 📊 Execução em Lote & Gestão de Recursos
-*   **Importação de Planilhas:** Suporte total a arquivos `.csv` e `.xlsx`.
-*   **Controle de Concorrência:** Slider dinâmico para definir quantos navegadores rodarão simultaneamente (de 1 a 15).
-*   **Monitoramento de RAM:** O sistema estima em tempo real quanta memória o seu computador usará para a operação.
-*   **Logs Detalhados:** Exportação dos resultados de sucesso ou erro para auditoria.
-
-### 4. 🧳 Portabilidade Total
-*   **EXE Standalone:** O aplicativo pode ser compilado em um executável portátil.
-*   **Auto-Instalação:** Ao rodar pela primeira vez em um novo PC, o app baixa e configura o motor Chromium automaticamente dentro da própria pasta.
-*   **Banco Local:** Seus templates ficam salvos em um arquivo `.db` portátil ao lado do executável.
+> [!TIP]
+> ### [🚀 Baixar Gerador de BOT v1.0.0 (.ZIP)](https://github.com/brucekawly/gerador-de-bot/releases/download/v1.0.0/GeradorDeBOT.zip)
+> *Compatível com Windows 10/11. Extraia o arquivo e execute o arquivo `GeradorDeBOT.exe`.*
 
 ---
 
-## 🛠️ Instalação (Para Desenvolvedores)
+## � Funcionalidades de Elite
 
-1.  **Clone o projeto:**
-    ```bash
-    git clone https://github.com/SEU_USUARIO/gerador-de-bot.git
+### 🎥 Gravador de Macros Inteligente (No-Code)
+*   **Aprendizado por Gravação:** Configure um equipamento manualmente e o sistema converterá suas ações em um script de automação instantaneamente.
+*   **Limpeza de Código:** O robô filtra redundâncias web, gerando scripts leves e confiáveis.
+*   **Variáveis Dinâmicas:** Substitua automaticamente dados sensíveis (IP, Porta, Usuários) por placeholders `{{IP}}`, `{{PORT}}` para uso em massa.
+
+### ⚡ Scanner de Rede Multi-Thread
+*   **Validação em Massa:** Realize varreduras rápidas em faixas de IP inteiras para identificar dispositivos online antes de iniciar a configuração.
+*   **Filtro Automático:** O sistema descarta IPs inacessíveis em segundos, otimizando a fila de trabalho.
+
+### 📊 Painel de Execução & Performance
+*   **Gerenciamento de Recursos:** Ajuste em tempo real o número de navegadores simultâneos (Navegação Paralela).
+*   **Monitoramento de Memória:** Estimativa dinâmica de uso de RAM para evitar travamentos no seu sistema operacional.
+*   **Logs Auditáveis:** Exportação completa de relatórios em formatos profissionais (XLSX/CSV).
+
+### 🧳 Solução Portátil & Autônoma
+*   **Self-Updating Motor:** Ao rodar pela primeira vez, o app detecta e baixa o motor Chromium necessário diretamente para a pasta local.
+*   **Banco de Dados Embarcado:** Seus templates e configurações viajam com o software em um DB portátil.
+
+---
+
+## 🛠️ Guia de Instalação (Desenvolvedores)
+
+Se você deseja contribuir ou estender as funcionalidades do projeto, siga os passos abaixo:
+
+1.  **Clonagem do Repositório:**
+    ```powershell
+    git clone https://github.com/brucekawly/gerador-de-bot.git
     cd gerador-de-bot
     ```
 
-2.  **Instale as dependências:**
-    ```bash
+2.  **Ambiente Virtual & Dependências:**
+    ```powershell
+    python -m venv venv
+    .\venv\Scripts\activate
     pip install -r requirements.txt
     ```
 
-3.  **Configure o motor do robô:**
-    ```bash
+3.  **Configuração do Motor Playwright:**
+    ```powershell
     playwright install chromium
     ```
 
-4.  **Inicie o aplicativo:**
-    ```bash
+4.  **Execução:**
+    ```powershell
     python main.py
     ```
 
 ---
 
-## 📦 Como Gerar o Executável (.exe)
+## � Licença
 
-Para criar a versão portátil para sua equipe técnica:
-1. Execute o script de build:
-   ```bash
-   python build_exe.py
-   ```
-2. A pasta final estará disponível em `dist/GeradorDeBOT`.
+Este projeto está sob a licença **MIT**. Veja o arquivo [LICENSE](LICENSE) para detalhes completos sobre permissões de uso e distribuição.
 
 ---
-
-## 📖 Como Usar (Fluxo Básico)
-
-1.  **Criar Template:** Vá em "Gerenciador de Templates" -> "+ Novo Template". Clique em "Gravar Ações", faça a configuração no roteador e feche o navegador. Salve o template.
-2.  **Importar Dados:** Vá em "Execução em Lote", importe sua planilha de clientes.
-3.  **Scanner (Opcional):** Use o "Scanner de Rede" para garantir que os equipamentos estão acessíveis.
-4.  **Executar:** Selecione o template, ajuste o número de navegadores e clique em "Iniciar Onda".
-
----
-
-## 🤝 Contribuições
-
-Sinta-se à vontade para abrir **Issues** ou enviar **Pull Requests**. Sugestões de melhorias na interface ou novos módulos de scanner são sempre bem-vindas!
-
----
-
-## 📜 Licença
-
-Este projeto está sob a licença **MIT**. Veja o arquivo [LICENSE](LICENSE) para detalhes.
-
-Desenvolvido com ❤️ por **Bruce Kawly**
+Desenvolvido com excelência por **[Bruce Kawly](https://github.com/brucekawly)**.
