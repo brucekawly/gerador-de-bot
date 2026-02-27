@@ -1,4 +1,4 @@
-# 🤖 Gerador de BOT - Automação Profissional de Roteadores & ONTs
+# 🤖 Gerador de BOT - Roteadores & ONTs
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python v3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
@@ -83,3 +83,4 @@ Este projeto está sob a licença **MIT**. Veja o arquivo [LICENSE](LICENSE) par
 
 ---
 Desenvolvido com excelência por **[Bruce Kawly](https://github.com/brucekawly)**.
+
