@@ -1,4 +1,4 @@
-# 🤖 Gerador de BOT - Roteadores & ONTs
+# 🤖 Gerador de BOT - Automação Profissional de Roteadores & ONTs
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python v3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
@@ -21,12 +21,20 @@ O **Gerador de BOT** é uma solução avançada de automação desenvolvida em P
 Para usuários que desejam apenas utilizar a ferramenta sem configurar o ambiente de desenvolvimento, baixe a versão estável pronta para uso:
 
 > [!TIP]
-> ### [🚀 Baixar Gerador de BOT v1.0.0 (.ZIP)](https://github.com/brucekawly/gerador-de-bot/releases/download/v1.0.0/GeradorDeBOT.zip)
+> ### [🚀 Baixar Gerador de BOT v1.1.0 (.ZIP)](https://github.com/brucekawly/gerador-de-bot/releases/download/v1.1.0/GeradorDeBOT.zip)
 > *Compatível com Windows 10/11. Extraia o arquivo e execute o arquivo `GeradorDeBOT.exe`.*
 
 ---
 
-## � Funcionalidades de Elite
+## 🔥 Novidades na v1.1.0
+
+*   **Multi-Navegador Nativo:** Seleção sob demanda entre os motores Mozilla Firefox (Padrão e Resistente), Chromium e WebKit. O app só baixa o necessário!
+*   **Controle de Timeout:** Escolha flexível de tempos de espera da rede (15s a 90s) para roteadores ou ONTs mais lentos.
+*   **Regex Inteligente:** O gravador de templates substitui automaticamente qualquer IPv4 digitado por `{{IP}}`.
+
+---
+
+## 💎 Funcionalidades de Elite
 
 ### 🎥 Gravador de Macros Inteligente (No-Code)
 *   **Aprendizado por Gravação:** Configure um equipamento manualmente e o sistema converterá suas ações em um script de automação instantaneamente.
@@ -43,7 +51,7 @@ Para usuários que desejam apenas utilizar a ferramenta sem configurar o ambient
 *   **Logs Auditáveis:** Exportação completa de relatórios em formatos profissionais (XLSX/CSV).
 
 ### 🧳 Solução Portátil & Autônoma
-*   **Self-Updating Motor:** Ao rodar pela primeira vez, o app detecta e baixa o motor Chromium necessário diretamente para a pasta local.
+*   **Self-Updating Motor:** Ao rodar pela primeira vez ou ao trocar de navegador, o app detecta e baixa o motor necessário (Playwright) diretamente para a pasta local apenas sob demanda.
 *   **Banco de Dados Embarcado:** Seus templates e configurações viajam com o software em um DB portátil.
 
 ---
@@ -83,4 +91,3 @@ Este projeto está sob a licença **MIT**. Veja o arquivo [LICENSE](LICENSE) par
 
 ---
 Desenvolvido com excelência por **[Bruce Kawly](https://github.com/brucekawly)**.
-

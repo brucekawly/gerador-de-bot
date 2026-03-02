@@ -163,7 +163,7 @@ class TemplatesView(ctk.CTkFrame):
     def open_new_template_modal(self, template_id=None):
         modal = ctk.CTkToplevel(self)
         modal.title("Editar Template" if template_id else "Novo Template")
-        modal.geometry("500x800")
+        modal.geometry("650x800")
         modal.transient(self.winfo_toplevel())
         modal.grab_set()
 
@@ -220,16 +220,33 @@ class TemplatesView(ctk.CTkFrame):
 4. Faça o login normalmente e aplique as configurações devidas (ex: criar WAN, PPPOE, etc).
 5. IMPORTANTE: Não clique em lugares desnecessários para não sujar o código.
 6. Quando terminar e salvar as configs no roteador, FECHE O NAVEGADOR.
-7. O código limpo aparecerá automaticamente na caixa abaixo!"""
+7. O código limpo aparecerá automaticamente na caixa abaixo!
+8. DICA: O sistema tentará trocar o IP gravado por {{IP}} automaticamente para funcionar nos outros!"""
 
         lbl_inst = ctk.CTkLabel(inst_frame, text=inst_text, justify="left", font=("Arial", 11))
         lbl_inst.pack(padx=10, pady=10, anchor="w")
 
+        # Config Frame inside recording for browser choice
+        record_config_frame = ctk.CTkFrame(modal, fg_color="transparent")
+        record_config_frame.pack(fill="x", padx=20, pady=(0, 10))
+        
+        ctk.CTkLabel(record_config_frame, text="Navegador para Gravação:").pack(side="left", padx=(0, 10))
+        self.record_browser_var = ctk.StringVar(value="Firefox")
+        self.cb_record_browser = ctk.CTkOptionMenu(record_config_frame, variable=self.record_browser_var, values=["Firefox", "Chromium", "WebKit"], width=150)
+        self.cb_record_browser.pack(side="left", padx=(0, 20))
+        
+        ctk.CTkLabel(record_config_frame, text="Timeout (Espera):").pack(side="left", padx=(0, 10))
+        self.timeout_var = ctk.StringVar(value="15s (Rápido)")
+        self.cb_timeout = ctk.CTkOptionMenu(record_config_frame, variable=self.timeout_var, values=["15s (Rápido)", "30s (Padrão)", "60s (Lento)", "90s (Muito Lento)"], width=130)
+        self.cb_timeout.pack(side="left")
+
         # Record Button Magic
         def launch_recorder():
-            messagebox.showinfo("Gravador Iniciado", "Atenção:\n1. O navegador vai abrir agora.\n2. Faça a configuração no roteador.\n3. Feche o navegador para o código ser gerado aqui na tela.")
+            chosen_browser = self.record_browser_var.get().lower()
             
-            def run_codegen():
+            def _start_recording():
+                messagebox.showinfo("Gravador Iniciado", "Atenção:\n1. O navegador vai abrir agora.\n2. Faça a configuração no roteador.\n3. Feche o navegador para o código ser gerado aqui na tela.")
+                
                 # Runs playwright CLI to record actions
                 # Target asynchronous python target
                 try:
@@ -240,9 +257,9 @@ class TemplatesView(ctk.CTkFrame):
                         # Se estiver rodando como EXE (PyInstaller)
                         from playwright._impl._driver import compute_driver_executable
                         driver_executable, driver_cli = compute_driver_executable()
-                        cmd = [driver_executable, driver_cli, "codegen", "--target", "python-async", "-o", tmp_file]
+                        cmd = [driver_executable, driver_cli, "codegen", "-b", chosen_browser, "--target", "python-async", "-o", tmp_file]
                     else:
-                        cmd = [sys.executable, "-m", "playwright", "codegen", "--target", "python-async", "-o", tmp_file]
+                        cmd = [sys.executable, "-m", "playwright", "codegen", "-b", chosen_browser, "--target", "python-async", "-o", tmp_file]
                         
                     subprocess.run(cmd, check=True)
                     
@@ -301,7 +318,13 @@ class TemplatesView(ctk.CTkFrame):
                 except Exception as e:
                     print(f"Error recording: {e}")
                     
-            threading.Thread(target=run_codegen, daemon=True).start()
+            # Check for browser and prompt download if necessary
+            app_root = self.winfo_toplevel()
+            if hasattr(app_root, 'download_browser_if_missing'):
+                # We thread the start_recording so it doesn't block the UI while Playwright runs
+                app_root.download_browser_if_missing(chosen_browser, callback=lambda: threading.Thread(target=_start_recording, daemon=True).start())
+            else:
+                threading.Thread(target=_start_recording, daemon=True).start()
 
         btn_record = ctk.CTkButton(modal, text="🔴 Gravar Ações (Abrir Navegador)", command=launch_recorder, fg_color="#C93B3B", hover_color="#912828")
         btn_record.pack(pady=10)

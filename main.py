@@ -19,15 +19,15 @@ if getattr(sys, 'frozen', False):
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
 
-def install_browsers(progress_callback, result_callback):
+def install_browsers(browser_name, progress_callback, result_callback):
     try:
-        # Use the playwright CLI to install only chromium
+        # Use the playwright CLI to install the specific browser
         if getattr(sys, 'frozen', False):
             from playwright._impl._driver import compute_driver_executable
             driver_executable, driver_cli = compute_driver_executable()
-            cmd = [driver_executable, driver_cli, "install", "chromium"]
+            cmd = [driver_executable, driver_cli, "install", browser_name]
         else:
-            cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+            cmd = [sys.executable, "-m", "playwright", "install", browser_name]
             
         # We need to capture the output to show progress
         process = subprocess.Popen(
@@ -65,7 +65,7 @@ class TR069ProvisionerApp(ctk.CTk):
         self.geometry("1400x800")
         
         # Check for Playwright browsers
-        self.after(500, self.verify_browsers)
+        self.after(500, lambda: self.download_browser_if_missing("firefox"))
 
         # Database initialization
         self.db = DatabaseHandler()
@@ -129,21 +129,33 @@ class TR069ProvisionerApp(ctk.CTk):
         self.btn_execution.configure(fg_color=["#3B8ED0", "#1F6AA5"])
         self.btn_templates.configure(fg_color="transparent")
 
-    def verify_browsers(self):
+    def download_browser_if_missing(self, browser_name="firefox", callback=None):
         if getattr(sys, 'frozen', False):
+            # In PyInstaller frozen bundle, browsers are saved next to the exe
             browser_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-            # If path doesn't exist or is empty
-            if not os.path.exists(browser_path) or not os.listdir(browser_path):
+            # We assume if the specific folder inside ms-playwright roughly matching the name exists, it's there.
+            # A safer but simpler heuristic: Just let playwright install it if it's missing. Or we check the directory contents.
+            is_missing = True
+            if browser_path and os.path.exists(browser_path):
+                # Search for a folder matching the browser name
+                for folder in os.listdir(browser_path):
+                    if browser_name in folder.lower():
+                        is_missing = False
+                        break
+            
+            if is_missing:
+                # Ask user
+                browser_display = browser_name.capitalize()
                 if messagebox.askyesno("Configuração Inicial", 
-                    "O motor de navegação (Chromium) não foi encontrado.\n\nDeseja baixar e configurar automaticamente agora?\n(Isso levará cerca de 1 min e é necessário apenas uma vez)"):
+                    f"O motor de navegação ({browser_display}) não foi encontrado.\n\nDeseja baixar e configurar automaticamente agora?\n(Será necessário apenas uma vez)"):
                     
                     progress_modal = ctk.CTkToplevel(self)
-                    progress_modal.title("Baixando Motor...")
+                    progress_modal.title(f"Baixando {browser_display}...")
                     progress_modal.geometry("400x150")
                     progress_modal.transient(self)
                     progress_modal.grab_set()
                     
-                    ctk.CTkLabel(progress_modal, text="Baixando Chromium...\nIsso pode levar alguns minutos.", font=ctk.CTkFont(size=14)).pack(pady=(20, 10))
+                    ctk.CTkLabel(progress_modal, text=f"Baixando {browser_display}...\nIsso pode levar alguns minutos.", font=ctk.CTkFont(size=14)).pack(pady=(20, 10))
                     
                     progress_bar = ctk.CTkProgressBar(progress_modal, width=300)
                     progress_bar.set(0)
@@ -160,11 +172,21 @@ class TR069ProvisionerApp(ctk.CTk):
                     def on_done(success):
                         progress_modal.destroy()
                         if success:
-                            messagebox.showinfo("Sucesso", "Motor configurado! O app está pronto para uso.")
+                            messagebox.showinfo("Sucesso", f"Motor {browser_display} configurado! O app está pronto.")
+                            if callback:
+                                callback()
                         else:
                             messagebox.showerror("Erro", "Falha ao instalar motor. Verifique sua conexão.")
-
-                    threading.Thread(target=install_browsers, args=(update_progress, on_done), daemon=True).start()
+                            
+                    threading.Thread(target=install_browsers, args=(browser_name, update_progress, on_done), daemon=True).start()
+            else:
+                # Browser already exists
+                if callback:
+                    callback()
+        else:
+            # We assume dev environment has playwright installed globally
+            if callback:
+                callback()
 
 if __name__ == "__main__":
     app = TR069ProvisionerApp()

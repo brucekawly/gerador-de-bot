@@ -28,16 +28,28 @@ class ExecutionView(ctk.CTkFrame):
         
         # Template selection
         self.template_var = ctk.StringVar(value="Selecione um Template")
-        self.cb_templates = ctk.CTkOptionMenu(self.config_frame, variable=self.template_var, values=self._get_template_names(), width=300)
+        self.cb_templates = ctk.CTkOptionMenu(self.config_frame, variable=self.template_var, values=self._get_template_names(), width=220)
         self.cb_templates.grid(row=0, column=1, padx=20)
         
+        # Browser Selection
+        ctk.CTkLabel(self.config_frame, text="Navegador:").grid(row=0, column=2, padx=(5, 5))
+        self.browser_var = ctk.StringVar(value="Firefox")
+        self.cb_browser = ctk.CTkOptionMenu(self.config_frame, variable=self.browser_var, values=["Firefox", "Chromium", "WebKit"], width=100)
+        self.cb_browser.grid(row=0, column=3, padx=(0, 20))
+        
         # Concurrency scale
-        ctk.CTkLabel(self.config_frame, text="Navegadores Simultâneos:").grid(row=0, column=2, padx=(20, 5))
+        ctk.CTkLabel(self.config_frame, text="Navegadores Simultâneos:").grid(row=0, column=4, padx=(10, 5))
         self.workers_var = ctk.IntVar(value=3)
         self.slider_workers = ctk.CTkSlider(self.config_frame, from_=1, to=15, variable=self.workers_var, number_of_steps=14, width=150, command=self._update_slider_label)
-        self.slider_workers.grid(row=0, column=3, padx=5)
+        self.slider_workers.grid(row=0, column=5, padx=5)
         self.lbl_workers = ctk.CTkLabel(self.config_frame, text="3 (~450MB RAM)")
-        self.lbl_workers.grid(row=0, column=4, padx=5)
+        self.lbl_workers.grid(row=0, column=6, padx=5)
+        
+        # Timeout Selection Row 1 Option
+        ctk.CTkLabel(self.config_frame, text="Timeout (Espera):").grid(row=1, column=2, padx=(5, 5), pady=(0, 10))
+        self.timeout_var = ctk.StringVar(value="15s (Rápido)")
+        self.cb_timeout = ctk.CTkOptionMenu(self.config_frame, variable=self.timeout_var, values=["15s (Rápido)", "30s (Padrão)", "60s (Lento)", "90s (Muito Lento)"], width=130)
+        self.cb_timeout.grid(row=1, column=3, padx=(0, 20), pady=(0, 10), sticky="w")
 
         # 2. Action Bar
         self.action_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -200,6 +212,18 @@ class ExecutionView(ctk.CTkFrame):
             messagebox.showerror("Erro", f"Falha ao exportar arquivo:\n{e}")
 
     def start_execution(self):
+        chosen_browser_lower = self.browser_var.get().lower()
+        app_root = self.winfo_toplevel()
+        if hasattr(app_root, 'download_browser_if_missing'):
+            app_root.download_browser_if_missing(
+                chosen_browser_lower, 
+                callback=self._start_execution_internal
+            )
+        else:
+            self._start_execution_internal()
+
+    def _start_execution_internal(self):
+        """Internal method to start execution after browser check."""
         if not self.devices:
             messagebox.showwarning("Aviso", "Importe uma lista de equipamentos primeiro.")
             return
@@ -219,6 +243,10 @@ class ExecutionView(ctk.CTkFrame):
         script = template_row[5] # actions_script column
         workers = int(self.workers_var.get())
         
+        # Parse timeout from selected text
+        timeout_str_val = self.timeout_var.get().split("s")[0]
+        timeout_ms = int(timeout_str_val) * 1000
+        
         self.btn_play.pack_forget()
         self.btn_stop.pack(side="right", padx=5)
         self.btn_import.configure(state="disabled")
@@ -234,7 +262,7 @@ class ExecutionView(ctk.CTkFrame):
             
             try:
                 results = loop.run_until_complete(
-                    self.active_engine.run_batch(self.devices, script, progress_callback=self.update_device_status)
+                    self.active_engine.run_batch(self.devices, script, "admin", "admin", browser_type=self.browser_var.get().lower(), timeout_ms=timeout_ms, progress_callback=self.update_device_status)
                 )
                 
                 # Execution finished
@@ -498,21 +526,52 @@ class ExecutionView(ctk.CTkFrame):
                     lbl_status.configure(text=msg)
                 modal.after(0, _upd)
             
+            def _run_async_in_thread(engine, device, template_code, browser_type="firefox", timeout_ms=15000):
+                """ Runs the async execution engine in a separate thread's event loop """
+                ip = device["ip"]
+                port = device["port"]
+                username = device.get("username", "admin")
+                password = device.get("password", "admin")
+                
+                # We need a new event loop for this thread if one doesn't exist
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                # Run the async execution method
+                return loop.run_until_complete(
+                    engine.execute_template_on_router(
+                        ip=ip, 
+                        port=port, 
+                        username=username,
+                        password=password,
+                        template_script=template_code, 
+                        progress_callback=test_progress, # Use the local test_progress
+                        visible=True, # Keep visible for single test
+                        browser_type=browser_type,
+                        timeout_ms=timeout_ms
+                    )
+                )
+                    
             def async_runner():
                 engine = AutomationEngine(max_concurrent=1)
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                # For single test, login is usually hardcoded in script by Codegen
-                device = [{"ip": ip, "port": entry_port.get().strip()}]
+                device = {"ip": ip, "port": entry_port.get().strip()}
+                
+                # Get the browser type chosen in the UI
+                chosen_browser = self.browser_var.get()
+                
+                # Parse timeout from selected text
+                timeout_str_val = self.timeout_var.get().split("s")[0]
+                timeout_ms = int(timeout_str_val) * 1000
                 
                 try:
-                    result = loop.run_until_complete(
-                        engine.run_batch(device, script, test_progress, visible=True)
-                    )
+                    result = _run_async_in_thread(engine, device, script, browser_type=chosen_browser, timeout_ms=timeout_ms)
                     
                     def _finish():
                         btn_exec.configure(state="normal", text="Executar Teste")
-                        res = result[0]
+                        res = result
                         if isinstance(res, dict) and res.get('status') == 'success':
                             lbl_status.configure(text="SUCESSO! Configuração aplicada.", text_color="#2EA043")
                             messagebox.showinfo("Sucesso", "O script rodou perfeitamente neste roteador!")
@@ -528,10 +587,17 @@ class ExecutionView(ctk.CTkFrame):
                         lbl_status.configure(text="Erro crítico", text_color="#C93B3B")
                         messagebox.showerror("Exceção", str(e))
                     modal.after(0, _err)
-                finally:
-                    loop.close()
                     
-            threading.Thread(target=async_runner, daemon=True).start()
+            # Wrap the start inside the verification logic
+            chosen_browser_lower = self.browser_var.get().lower()
+            app_root = self.winfo_toplevel()
+            if hasattr(app_root, 'download_browser_if_missing'):
+                app_root.download_browser_if_missing(
+                    chosen_browser_lower, 
+                    callback=lambda: threading.Thread(target=async_runner, daemon=True).start()
+                )
+            else:
+                threading.Thread(target=async_runner, daemon=True).start()
 
         btn_exec = ctk.CTkButton(modal, text="Executar Teste", command=run_single_test, fg_color="#D1911B", hover_color="#9C6B11")
         btn_exec.pack(pady=10)
