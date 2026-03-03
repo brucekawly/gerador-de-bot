@@ -21,16 +21,18 @@ O **Gerador de BOT** é uma solução avançada de automação desenvolvida em P
 Para usuários que desejam apenas utilizar a ferramenta sem configurar o ambiente de desenvolvimento, baixe a versão estável pronta para uso:
 
 > [!TIP]
-> ### [🚀 Baixar Gerador de BOT v1.1.0 (.ZIP)](https://github.com/brucekawly/gerador-de-bot/releases/download/v1.1.0/GeradorDeBOT.zip)
+> ### [🚀 Baixar Gerador de BOT v1.2.0 (.ZIP)](https://github.com/brucekawly/gerador-de-bot/releases/download/v1.2.0/GeradorDeBOT.zip)
 > *Compatível com Windows 10/11. Extraia o arquivo e execute o arquivo `GeradorDeBOT.exe`.*
 
 ---
 
-## 🔥 Novidades na v1.1.0
+## 🔥 Novidades na v1.2.0
 
+*   **Exportar para Python (Standalone):** Agora você pode exportar sua fila de execução inteira (com o template já configurado) diretamente para um arquivo `.py` independente. Execute-o no servidor Linux da sua provedora sem a interface gráfica!
+*   **Performance Absurda:** Limite de navegadores simultâneos expandido de 15 para incríveis **100 abas** testando equipamentos ao mesmo tempo.
+*   **Alerta Visual de RAM:** Trava de segurança visual indicando consumo perigoso de memória RAM quando ultrapassar 30 navegadores simultâneos.
 *   **Multi-Navegador Nativo:** Seleção sob demanda entre os motores Mozilla Firefox (Padrão e Resistente), Chromium e WebKit. O app só baixa o necessário!
-*   **Controle de Timeout:** Escolha flexível de tempos de espera da rede (15s a 90s) para roteadores ou ONTs mais lentos.
-*   **Regex Inteligente:** O gravador de templates substitui automaticamente qualquer IPv4 digitado por `{{IP}}`.
+*   **UI Aprimorada:** Largura da janela ajustada e componentes reposicionados para evitar cortes em telas menores.
 
 ---
 
