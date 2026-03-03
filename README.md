@@ -21,7 +21,7 @@ O **Gerador de BOT** é uma solução avançada de automação desenvolvida em P
 Para usuários que desejam apenas utilizar a ferramenta sem configurar o ambiente de desenvolvimento, baixe a versão estável pronta para uso:
 
 > [!TIP]
-> ### [🚀 Baixar Gerador de BOT v1.2.0 (.ZIP)](https://github.com/brucekawly/gerador-de-bot/releases/download/v1.2.0/GeradorDeBOT.zip)
+> ### [🚀 Baixar Gerador de BOT v1.2.0 (.ZIP)](https://github.com/brucekawly/gerador-de-bot/releases/download/v1.2.0/GeradorDeBOT_v1.2.0.zip)
 > *Compatível com Windows 10/11. Extraia o arquivo e execute o arquivo `GeradorDeBOT.exe`.*
 
 ---
@@ -93,3 +93,4 @@ Este projeto está sob a licença **MIT**. Veja o arquivo [LICENSE](LICENSE) par
 
 ---
 Desenvolvido com excelência por **[Bruce Kawly](https://github.com/brucekawly)**.
+
