@@ -62,7 +62,7 @@ class TR069ProvisionerApp(ctk.CTk):
         super().__init__()
 
         self.title("Gerador de BOT")
-        self.geometry("1400x800")
+        self.geometry("1500x800")
         
         # Check for Playwright browsers
         self.after(500, lambda: self.download_browser_if_missing("firefox"))

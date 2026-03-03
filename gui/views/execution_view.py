@@ -24,6 +24,9 @@ class ExecutionView(ctk.CTkFrame):
         self.config_frame = ctk.CTkFrame(self)
         self.config_frame.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="ew")
         
+        # Configure weight for column 6 so it extends fully and doesn't cut off text
+        self.config_frame.grid_columnconfigure(6, weight=1)
+        
         ctk.CTkLabel(self.config_frame, text="Execução em Lote", font=ctk.CTkFont(size=20, weight="bold")).grid(row=0, column=0, padx=10, pady=10, sticky="w")
         
         # Template selection
@@ -35,43 +38,46 @@ class ExecutionView(ctk.CTkFrame):
         ctk.CTkLabel(self.config_frame, text="Navegador:").grid(row=0, column=2, padx=(5, 5))
         self.browser_var = ctk.StringVar(value="Firefox")
         self.cb_browser = ctk.CTkOptionMenu(self.config_frame, variable=self.browser_var, values=["Firefox", "Chromium", "WebKit"], width=100)
-        self.cb_browser.grid(row=0, column=3, padx=(0, 20))
+        self.cb_browser.grid(row=0, column=3, padx=(0, 20), sticky="w")
         
-        # Concurrency scale
-        ctk.CTkLabel(self.config_frame, text="Navegadores Simultâneos:").grid(row=0, column=4, padx=(10, 5))
-        self.workers_var = ctk.IntVar(value=3)
-        self.slider_workers = ctk.CTkSlider(self.config_frame, from_=1, to=15, variable=self.workers_var, number_of_steps=14, width=150, command=self._update_slider_label)
-        self.slider_workers.grid(row=0, column=5, padx=5)
-        self.lbl_workers = ctk.CTkLabel(self.config_frame, text="3 (~450MB RAM)")
-        self.lbl_workers.grid(row=0, column=6, padx=5)
-        
-        # Timeout Selection Row 1 Option
-        ctk.CTkLabel(self.config_frame, text="Timeout (Espera):").grid(row=1, column=2, padx=(5, 5), pady=(0, 10))
+        # Timeout Selection 
+        ctk.CTkLabel(self.config_frame, text="Timeout (Espera):").grid(row=0, column=4, padx=(10, 5))
         self.timeout_var = ctk.StringVar(value="15s (Rápido)")
         self.cb_timeout = ctk.CTkOptionMenu(self.config_frame, variable=self.timeout_var, values=["15s (Rápido)", "30s (Padrão)", "60s (Lento)", "90s (Muito Lento)"], width=130)
-        self.cb_timeout.grid(row=1, column=3, padx=(0, 20), pady=(0, 10), sticky="w")
+        self.cb_timeout.grid(row=0, column=5, padx=(0, 20), sticky="w")
+
+        # Concurrency scale (Moved to Row 1 for more space)
+        ctk.CTkLabel(self.config_frame, text="Navegadores Simultâneos:").grid(row=1, column=0, padx=(10, 5), pady=(0, 10), sticky="e")
+        self.workers_var = ctk.IntVar(value=3)
+        self.slider_workers = ctk.CTkSlider(self.config_frame, from_=1, to=100, variable=self.workers_var, number_of_steps=99, width=200, command=self._update_slider_label)
+        self.slider_workers.grid(row=1, column=1, columnspan=2, padx=5, pady=(0, 10), sticky="w")
+        self.lbl_workers = ctk.CTkLabel(self.config_frame, text="3 (~450MB RAM)", anchor="w")
+        self.lbl_workers.grid(row=1, column=3, columnspan=4, padx=5, pady=(0, 10), sticky="w")
 
         # 2. Action Bar
         self.action_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.action_frame.grid(row=1, column=0, padx=20, pady=0, sticky="ew")
         
         self.btn_import = ctk.CTkButton(self.action_frame, text="📂 Importar Lista (CSV/Excel)", command=self.import_list)
-        self.btn_import.pack(side="left", padx=5)
+        self.btn_import.pack(side="left", padx=2)
         
         self.btn_export = ctk.CTkButton(self.action_frame, text="📜 Exportar Log", command=self.export_log, fg_color="#565b5e", hover_color="#343638", state="disabled")
         self.btn_export.pack(side="left", padx=5)
         
         self.btn_range = ctk.CTkButton(self.action_frame, text="🌐 Inserir Range IP", command=self.open_ip_range_modal, fg_color="#1F6AA5", hover_color="#144870")
-        self.btn_range.pack(side="left", padx=5)
+        self.btn_range.pack(side="left", padx=2)
         
         self.btn_scan = ctk.CTkButton(self.action_frame, text="📡 Scanner de Rede", command=self.open_ip_scanner_modal, fg_color="#6c3483", hover_color="#512e5f")
-        self.btn_scan.pack(side="left", padx=5)
+        self.btn_scan.pack(side="left", padx=2)
         
         self.btn_test = ctk.CTkButton(self.action_frame, text="🧪 Testar Único IP", command=self.open_test_modal, fg_color="#D1911B", hover_color="#9C6B11")
-        self.btn_test.pack(side="left", padx=20)
+        self.btn_test.pack(side="left", padx=(10, 2))
         
         self.btn_play = ctk.CTkButton(self.action_frame, text="▶️ INICIAR AUTOMAÇÃO", command=self.start_execution, fg_color="#2EA043", hover_color="#238636")
-        self.btn_play.pack(side="right", padx=5)
+        self.btn_play.pack(side="right", padx=2)
+        
+        self.btn_export_py = ctk.CTkButton(self.action_frame, text="🐍 Exportar Python", command=self.export_python, fg_color="#3776ab", hover_color="#2b5b84", state="disabled", width=140)
+        self.btn_export_py.pack(side="right", padx=10)
         
         self.btn_stop = ctk.CTkButton(self.action_frame, text="⏹️ PARAR", command=self.stop_execution, fg_color="#d12c2c", hover_color="#8f1919", width=100)
         self.btn_stop.pack(side="right", padx=5)
@@ -101,7 +107,11 @@ class ExecutionView(ctk.CTkFrame):
             ram_str = f"{ram_mb / 1024:.1f}GB"
         else:
             ram_str = f"{ram_mb}MB"
-        self.lbl_workers.configure(text=f"{workers} (~{ram_str} RAM)")
+            
+        if workers > 30:
+            self.lbl_workers.configure(text=f"{workers} (~{ram_str} RAM) ⚠️ ALTO", text_color="#d12c2c")
+        else:
+            self.lbl_workers.configure(text=f"{workers} (~{ram_str} RAM)", text_color=["gray10", "#DCE4EE"])
 
     def _get_template_names(self):
         templates = self.db.get_all_templates()
@@ -164,6 +174,7 @@ class ExecutionView(ctk.CTkFrame):
                     
             if self.devices:
                 self.btn_export.configure(state="normal")
+                self.btn_export_py.configure(state="normal")
                     
         except Exception as e:
             messagebox.showerror("Erro de Importação", f"Erro ao ler arquivo: {str(e)}\nFormato esperado: colunas IP, Porta")
@@ -211,6 +222,132 @@ class ExecutionView(ctk.CTkFrame):
         except Exception as e:
             messagebox.showerror("Erro", f"Falha ao exportar arquivo:\n{e}")
 
+    def export_python(self):
+        if not self.devices:
+            messagebox.showwarning("Aviso", "Nenhum dado na fila.")
+            return
+            
+        selected_text = self.template_var.get()
+        if not selected_text or "Nenhum" in selected_text or "Selecione" in selected_text:
+            messagebox.showwarning("Aviso", "Por favor, selecione um template do dropdown primeiro.")
+            return
+            
+        template_id = int(selected_text.split("]")[0].replace("[", ""))
+        template_row = self.db.get_template(template_id)
+        
+        if not template_row:
+            messagebox.showerror("Erro", "Template não encontrado no banco.")
+            return
+            
+        script = template_row[5] # actions_script column
+
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".py",
+            filetypes=[("Python Script", "*.py")],
+            title="Salvar script de automação"
+        )
+        if not filepath:
+            return
+
+        workers = int(self.workers_var.get())
+        timeout_str_val = self.timeout_var.get().split("s")[0]
+        timeout_ms = int(timeout_str_val) * 1000
+        browser_type = self.browser_var.get().lower()
+
+        devices_json = json.dumps(self.devices, indent=4)
+        script_escaped = script.replace('"""', '\\"\\"\\"')
+        
+        py_code = f'''import asyncio
+import json
+from playwright.async_api import async_playwright
+
+# Dependências necessárias para rodar este script:
+# pip install playwright
+# playwright install
+
+DEVICES = {devices_json}
+
+WORKERS = {workers}
+TIMEOUT_MS = {timeout_ms}
+BROWSER_TYPE = "{browser_type}"
+
+SCRIPT_TEMPLATE = """{script_escaped}"""
+
+async def execute_template_on_router(ip, port, username, password, semaphore):
+    async with semaphore:
+        async with async_playwright() as p:
+            browser = None
+            try:
+                browser_instance = getattr(p, BROWSER_TYPE.lower(), p.firefox)
+                browser = await browser_instance.launch(headless=True)
+                context = await browser.new_context(ignore_https_errors=True)
+                page = await context.new_page()
+                page.set_default_timeout(TIMEOUT_MS)
+                
+                print(f"[{{ip}}] Iniciando conexão...")
+                
+                variables = {{
+                    "{{{{IP}}}}": ip,
+                    "{{{{PORT}}}}": str(port),
+                    "{{{{USERNAME}}}}": username,
+                    "{{{{PASSWORD}}}}": password
+                }}
+                
+                template_script = SCRIPT_TEMPLATE
+                for key, val in variables.items():
+                    template_script = template_script.replace(key, str(val))
+                    
+                local_env = {{
+                    'page': page,
+                    'browser': browser,
+                    'context': context,
+                    'asyncio': asyncio,
+                    'variables': variables
+                }}
+                
+                script_lines = "\\n".join([f"    {{line}}" for line in template_script.splitlines()])
+                wrapped_script = f"async def run_automation(page):\\n{{script_lines}}"
+                
+                exec(wrapped_script, globals(), local_env)
+                await local_env['run_automation'](page)
+                
+                print(f"[{{ip}}] Sucesso")
+                return {{"ip": ip, "status": "success"}}
+            except Exception as e:
+                print(f"[{{ip}}] Erro: {{str(e)}}")
+                return {{"ip": ip, "status": "error", "message": str(e)}}
+            finally:
+                if browser:
+                    await browser.close()
+
+async def run_batch():
+    tasks = []
+    semaphore = asyncio.Semaphore(WORKERS)
+            
+    for dev in DEVICES:
+        tasks.append(execute_template_on_router(
+            ip=dev['ip'],
+            port=dev['port'],
+            username=dev.get('username', 'admin'),
+            password=dev.get('password', 'admin'),
+            semaphore=semaphore
+        ))
+        
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    success = sum(1 for r in results if isinstance(r, dict) and r.get('status') == 'success')
+    print(f"\\nExecução concluída! Sucessos: {{success}} de {{len(DEVICES)}}")
+
+if __name__ == "__main__":
+    print("Iniciando execução em lote independente...")
+    asyncio.run(run_batch())
+'''
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(py_code)
+            messagebox.showinfo("Sucesso", f"Script Python exportado com sucesso para:\n{filepath}\n\nLembre-se de instalar as dependências:\n1. pip install playwright\n2. playwright install")
+        except Exception as e:
+            messagebox.showerror("Erro", f"Falha ao exportar script:\n{e}")
+
     def start_execution(self):
         chosen_browser_lower = self.browser_var.get().lower()
         app_root = self.winfo_toplevel()
@@ -251,6 +388,7 @@ class ExecutionView(ctk.CTkFrame):
         self.btn_stop.pack(side="right", padx=5)
         self.btn_import.configure(state="disabled")
         self.btn_export.configure(state="disabled")
+        self.btn_export_py.configure(state="disabled")
         self.slider_workers.configure(state="disabled")
 
         # Asyncio loop runner
@@ -272,6 +410,7 @@ class ExecutionView(ctk.CTkFrame):
                     self.btn_play.configure(state="normal", text="▶️ INICIAR AUTOMAÇÃO")
                     self.btn_import.configure(state="normal")
                     self.btn_export.configure(state="normal")
+                    self.btn_export_py.configure(state="normal")
                     messagebox.showinfo("Sucesso", "Todas as operações foram concluídas!")
                     self.slider_workers.configure(state="normal")
                     
@@ -391,6 +530,7 @@ class ExecutionView(ctk.CTkFrame):
                             
                         if self.devices:
                             self.btn_export.configure(state="normal")
+                            self.btn_export_py.configure(state="normal")
                             
                         messagebox.showinfo("Scanner Finalizado", f"Varredura concluída. {len(active_ips)} IPs ativos encontrados.")
                         modal.destroy()
@@ -465,6 +605,10 @@ class ExecutionView(ctk.CTkFrame):
                     self.tree.insert("", "end", values=(dev['ip'], dev['port'], dev['status']))
                     current_ip += 1
                     count += 1
+                    
+                if self.devices:
+                    self.btn_export.configure(state="normal")
+                    self.btn_export_py.configure(state="normal")
                     
                 messagebox.showinfo("Sucesso", f"{count} IPs gerados e adicionados à fila de execução!")
                 modal.destroy()
