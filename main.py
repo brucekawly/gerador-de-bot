@@ -11,6 +11,7 @@ from core.platform_utils import no_window_flags
 from database.db_handler import DatabaseHandler
 from gui.views.templates_view import TemplatesView
 from gui.views.execution_view import ExecutionView
+from gui.views.servers_view import ServersView
 
 APP_VERSION = "1.3.0"
 
@@ -67,7 +68,7 @@ class TR069ProvisionerApp(ctk.CTk):
         # ---- barra lateral
         self.sidebar_frame = ctk.CTkFrame(self, width=210, corner_radius=0, fg_color=theme.SIDEBAR, border_width=0)
         self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
-        self.sidebar_frame.grid_rowconfigure(4, weight=1)
+        self.sidebar_frame.grid_rowconfigure(5, weight=1)
 
         ctk.CTkLabel(self.sidebar_frame, text="Gerador de BOT", font=theme.font(19, "bold")).grid(
             row=0, column=0, padx=18, pady=(22, 2), sticky="w")
@@ -75,7 +76,7 @@ class TR069ProvisionerApp(ctk.CTk):
                      font=theme.font(11)).grid(row=1, column=0, padx=18, pady=(0, 18), sticky="w")
 
         self.nav = {}
-        for r, (key, label) in enumerate((("templates", "Templates"), ("execution", "Execução em lote")), start=2):
+        for r, (key, label) in enumerate((("templates", "Templates"), ("execution", "Execução em lote"), ("servers", "Servidores")), start=2):
             b = ctk.CTkButton(self.sidebar_frame, text=label, anchor="w", height=38, width=180,
                               fg_color="transparent", text_color=theme.TEXT_2,
                               hover_color=theme.HOVER, font=theme.font(13), corner_radius=8,
@@ -84,16 +85,16 @@ class TR069ProvisionerApp(ctk.CTk):
             self.nav[key] = b
 
         ctk.CTkLabel(self.sidebar_frame, text="Tema", text_color=theme.MUTED, font=theme.font(11)).grid(
-            row=5, column=0, padx=18, sticky="w")
+            row=6, column=0, padx=18, sticky="w")
         self.appearance_mode_optionemenu = ctk.CTkOptionMenu(
             self.sidebar_frame, values=["Claro", "Escuro", "Sistema"], width=180,
             command=self.change_appearance_mode_event)
         self.appearance_mode_optionemenu.set("Claro")
-        self.appearance_mode_optionemenu.grid(row=6, column=0, padx=14, pady=(2, 12))
+        self.appearance_mode_optionemenu.grid(row=7, column=0, padx=14, pady=(2, 12))
 
         self.lbl_copyright = ctk.CTkLabel(self.sidebar_frame, text="© 2026 Bruce Kawly", font=theme.font(10),
                                           text_color=theme.MUTED)
-        self.lbl_copyright.grid(row=7, column=0, padx=18, pady=(0, 16), sticky="w")
+        self.lbl_copyright.grid(row=8, column=0, padx=18, pady=(0, 16), sticky="w")
 
         # ---- conteúdo
         self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
@@ -101,9 +102,11 @@ class TR069ProvisionerApp(ctk.CTk):
 
         self.views = {
             "templates": TemplatesView(self.main_frame, self.db),
+            "servers": ServersView(self.main_frame, self.db),
             "execution": ExecutionView(self.main_frame, self.db),
         }
         self.views["templates"].on_change = self.views["execution"].refresh_templates
+        self.views["servers"].on_change = self.views["execution"].refresh_servers
         self.show_view("execution" if self.db.get_all_templates() else "templates")
 
     def change_appearance_mode_event(self, label: str):
@@ -198,3 +201,5 @@ def browser_installed(name: str) -> bool:
 if __name__ == "__main__":
     app = TR069ProvisionerApp()
     app.mainloop()
+    from core.remote import POOL
+    POOL.close()   # fecha as conexões SSH com os servidores

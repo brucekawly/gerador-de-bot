@@ -108,6 +108,20 @@ página web (título, header `Server`, realm do login), **UPnP**, **SNMP** (`sys
 
 > O firmware geralmente só aparece depois do login, então nem sempre é detectado.
 
+Não sabe as faixas? **Descobrir redes** lista as redes que dá para varrer, de onde vieram (interface, rota, vizinhos na tabela ARP, CPEs conectadas ao ACS) e quantos IPs têm. Redes grandes vêm desmarcadas.
+
+### Acesso pelo servidor do cliente
+
+Quando os equipamentos estão numa rede privada que só o servidor do cliente alcança, cadastre o servidor em **Servidores** (host, porta SSH, usuário e chave ou senha) e escolha **Acessar via** na Execução, no Scanner ou no gravador de template. A partir daí:
+
+- **Scanner:** os testes de porta rodam **no servidor**, e a identificação passa pelo túnel.
+- **Abrir no navegador** (dois cliques no scanner ou botão direito na fila) e **Gravar template:** abrem o navegador do app saindo pelo servidor.
+- **Executar lote** e **Testar em 1 IP:** passam pelo mesmo caminho, sem mudar nada nos templates.
+
+Como funciona: uma conexão SSH com o servidor e um proxy SOCKS5 local (igual ao `ssh -D`). Nada é instalado no servidor, e o app só roda lá uma lista fixa de comandos de consulta (`ip addr`/`route`/`neigh`, `ss`, teste de porta com `bash`, `snmpget`). As senhas ficam no cofre do sistema (Windows, Keychain do macOS ou Secret Service do Linux), nunca no banco.
+
+> O servidor precisa permitir encaminhamento de porta no SSH (`AllowTcpForwarding`, ligado por padrão no OpenSSH). O teste de portas pelo servidor usa `bash` e `timeout`.
+
 ---
 
 ## Linha de comando (sem interface)
@@ -118,8 +132,14 @@ python -m core run --template-id 3 --devices equipamentos.xlsx --json resultado.
 python -m core run --template-file template.py --devices lista.csv \
        --credentials creds.txt --set PORT=8080 --workers 10 --attempts 3
 
-# scanner
-python -m core scan 192.168.1.1 192.168.1.254 --ports 80,443,8080 --json scan.json
+# scanner (faixas em CIDR, intervalos ou IPs soltos)
+python -m core scan 192.168.1.0/24 10.0.0.1-50 --ports 80,443,8080 --json scan.json
+python -m core scan --discover                          # redes que dá para varrer
+
+# pelo servidor do cliente (chave ~/.ssh/oltsoft_acs, usuário support)
+python -m core scan --discover --via 203.0.113.10:2222
+python -m core scan 10.20.30.0/24 --via 203.0.113.10:2222
+python -m core run --template-id 3 --devices lista.csv --via 203.0.113.10:2222
 
 # listar templates
 python -m core templates
@@ -137,9 +157,12 @@ core/                  motor, sem interface (reutilizável por outros sistemas)
   automation_engine.py   execução: navegador compartilhado, retry, credenciais, erros
   devices.py             planilha, variáveis, valores padrão, credenciais
   fingerprint.py         scanner e identificação de modelo
+  remote.py              acesso pelo servidor do cliente (SSH, proxy SOCKS, descoberta de redes)
+  browser.py             abrir navegador / gravador (direto ou pelo servidor)
+  vault.py               senhas no cofre do sistema
   cli.py                 linha de comando (python -m core)
   platform_utils.py      diferenças Windows/macOS/Linux
-database/db_handler.py SQLite (templates, credenciais, valores padrão)
+database/db_handler.py SQLite (templates, credenciais, valores padrão, servidores)
 gui/                   interface CustomTkinter (visual OLT Cloud)
 tests/                 testes com roteador falso local
 docs/INTEGRACAO.md     guia para integrar o motor em outro sistema

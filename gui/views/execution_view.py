@@ -17,6 +17,8 @@ from core.devices import (Device, missing_variables, parse_credentials, parse_da
                           resolve_variables, template_variables)
 from core.devices import BUILTIN_VARS
 from core.platform_utils import open_path
+from core.browser import open_url
+from core.remote import POOL
 from gui import theme
 from gui.views.credentials_dialog import CredentialsDialog
 from gui.views.scanner_dialog import ScannerDialog
@@ -24,6 +26,7 @@ from gui.views.scanner_dialog import ScannerDialog
 TIMEOUTS = {"15 s (rápido)": 15000, "30 s (padrão)": 30000, "60 s (lento)": 60000, "90 s (muito lento)": 90000}
 ATTEMPTS = {"1 (sem repetir)": 1, "2": 2, "3": 3, "5": 5}
 FILTERS = ["Todos", "Falhas", "Sucesso", "Pendentes"]
+DIRECT_LABEL = "Direto (rede deste PC)"
 
 
 class ExecutionView(ctk.CTkFrame):
@@ -81,7 +84,14 @@ class ExecutionView(ctk.CTkFrame):
 
         c2 = theme.card(steps)
         c2.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        theme.section_title(c2, "2", "Equipamentos").pack(anchor="w", padx=14, pady=(12, 6))
+        head2 = ctk.CTkFrame(c2, fg_color="transparent")
+        head2.pack(fill="x", padx=14, pady=(12, 6))
+        theme.section_title(head2, "2", "Equipamentos").pack(side="left")
+        self.via_var = ctk.StringVar(value=DIRECT_LABEL)
+        self.cb_via = ctk.CTkOptionMenu(head2, variable=self.via_var, values=[DIRECT_LABEL], width=220,
+                                        dynamic_resizing=False, command=lambda _=None: self._update_via_info())
+        self.cb_via.pack(side="right")
+        ctk.CTkLabel(head2, text="Acessar via", text_color=theme.MUTED).pack(side="right", padx=8)
         row2 = ctk.CTkFrame(c2, fg_color="transparent")
         row2.pack(fill="x", padx=14)
         self.btn_import = theme.button(row2, "Planilha", width=110, command=self.import_list)
@@ -183,11 +193,51 @@ class ExecutionView(ctk.CTkFrame):
         self.lbl_workers.configure(text=txt, text_color=theme.ERROR if n > 30 else theme.TEXT)
 
     # ================================================================== template
+    # ================================================================== acesso pelo servidor
+    def refresh_servers(self):
+        rows = self.db.get_servers()
+        self._servers = {f"Servidor: {r[1]}": r for r in rows}
+        values = [DIRECT_LABEL] + list(self._servers)
+        self.cb_via.configure(values=values)
+        if self.via_var.get() not in values:
+            self.via_var.set(DIRECT_LABEL)
+        self._update_via_info()
+
+    def _via_row(self):
+        return getattr(self, "_servers", {}).get(self.via_var.get())
+
+    def _update_via_info(self):
+        self._update_devices_info()
+
+    def _proxy_or_raise(self):
+        """Chamar FORA da thread da tela: conecta no servidor (se escolhido) e devolve o proxy."""
+        row = self._via_row()
+        return POOL.proxy(row) if row else None
+
+    def open_device(self, d):
+        """Abre o equipamento no navegador: direto no navegador padrão, ou pelo servidor no navegador do app."""
+        url = self._effective(d)["BASE_URL"] + "/"
+        row = self._via_row()
+        if not row:
+            webbrowser.open(url)
+            return
+
+        def worker():
+            try:
+                proxy = POOL.proxy(row)
+                open_url(url, proxy)
+            except Exception as e:  # noqa: BLE001
+                self.after(0, lambda e=e: messagebox.showerror("Abrir no navegador",
+                                                           f"Não conectou no servidor {row[1]}:\n{e}"))
+        threading.Thread(target=worker, daemon=True).start()
+
     def _get_template_names(self):
         self.template_rows = self.db.get_all_templates()
         return [f"[{t[0]}] {t[1]} {t[2]}" + (f" ({t[3]})" if t[3] else "") for t in self.template_rows]
 
     def refresh_templates(self):
+        if hasattr(self, "cb_via"):
+            self.refresh_servers()
         names = self._get_template_names()
         current = self.template_var.get()
         if not names:
@@ -265,6 +315,9 @@ class ExecutionView(ctk.CTkFrame):
         parts = [f"{n} equipamento(s) na fila"]
         if own:
             parts.append(f"{own} com usuário/senha próprio na planilha")
+        row = self._via_row()
+        if row:
+            parts.append(f"acesso pelo servidor {row[1]}")
         txt = " · ".join(parts)
         txt += "\n" + ("Dados por equipamento (colunas da planilha): " + ", ".join(cols) if cols
                        else "Sem dados por equipamento (só IP e porta)")
@@ -330,7 +383,9 @@ class ExecutionView(ctk.CTkFrame):
         theme.button(modal, "Adicionar à fila", "primary", command=gen).pack(pady=18)
 
     def open_ip_scanner_modal(self):
-        def on_add(fps, template):
+        def on_add(fps, template, via_label=None):
+            if via_label and via_label in [DIRECT_LABEL, *getattr(self, "_servers", {})]:
+                self.via_var.set(via_label)
             models = [" ".join(x for x in (f.vendor, f.model) if x) or "?" for f in fps]
             devs = []
             for f in fps:
@@ -340,7 +395,8 @@ class ExecutionView(ctk.CTkFrame):
             self._set_devices(devs, models)
             if template:
                 self._select_template_id(template[0])
-        ScannerDialog(self, self.db.get_all_templates(), on_add)
+        ScannerDialog(self, self.db.get_all_templates(), on_add,
+                      servers=getattr(self, "_servers", {}), via_label=self.via_var.get())
 
     # ================================================================== tabela
     def _row_values(self, i):
@@ -413,8 +469,7 @@ class ExecutionView(ctk.CTkFrame):
             if shot and os.path.exists(shot):
                 open_path(shot)
             else:
-                d = self.devices[int(iid)]
-                webbrowser.open(self._effective(d)["BASE_URL"] + "/")
+                self.open_device(self.devices[int(iid)])
 
     def _on_right_click(self, event):
         import tkinter as tk
@@ -426,8 +481,8 @@ class ExecutionView(ctk.CTkFrame):
         i = int(iid)
         d, r = self.devices[i], self.rows[i]
         menu = tk.Menu(self, tearoff=0)
-        menu.add_command(label="Abrir no navegador",
-                         command=lambda: webbrowser.open(self._effective(d)["BASE_URL"] + "/"))
+        menu.add_command(label="Abrir no navegador" + (" (pelo servidor)" if self._via_row() else ""),
+                         command=lambda: self.open_device(d))
         if r.get("screenshot") and os.path.exists(r["screenshot"]):
             menu.add_command(label="Ver screenshot da falha", command=lambda: open_path(r["screenshot"]))
         menu.add_command(label="Copiar IP", command=lambda: (self.clipboard_clear(), self.clipboard_append(d.ip)))
@@ -532,9 +587,10 @@ class ExecutionView(ctk.CTkFrame):
         def worker():
             results, error = [], None
             try:
+                proxy = self._proxy_or_raise()
                 results = asyncio.run(engine.run_batch(devices, tpl[5], creds, progress_callback=cb,
                                                        defaults=parse_defaults(tpl[7]),
-                                                       visible=visible, **settings))
+                                                       visible=visible, proxy=proxy, **settings))
             except Exception as e:  # noqa: BLE001
                 error = e
             self.after(0, lambda: self._finish(idx, results, error, engine))
@@ -628,6 +684,7 @@ class ExecutionView(ctk.CTkFrame):
                 engine = AutomationEngine(max_concurrent=1, retry=RetryPolicy(max_attempts=1))
                 try:
                     res = asyncio.run(engine.test_single(dev, tpl[5], parse_credentials(tpl[6]),
+                                                         proxy=self._proxy_or_raise(),
                                                          defaults=parse_defaults(tpl[7]),
                                                          progress_callback=cb, **self._settings()))
                 except Exception as e:  # noqa: BLE001

@@ -135,9 +135,19 @@ Outros pontos:
 O navegador precisa **alcançar a interface web do equipamento** (IP de gerência/LAN). Opções:
 
 1. **Worker no próprio servidor da instância do cliente**, se ele já tiver rota para a rede de gerência das CPEs.
-2. **Agente na rede do cliente** (um mini-PC ou VM rodando `python -m core run`), que recebe jobs do OLT Cloud e devolve o JSON. Resolve redes sem rota a partir da nuvem.
+2. **Worker central saindo pelo servidor do cliente** (já implementado em `core/remote.py`): SSH no servidor + proxy SOCKS5. O lote, o scanner e o navegador passam pelo servidor sem instalar nada nele:
 
-Isso depende da topologia de cada provedor e precisa ser definido com a equipe.
+   ```python
+   from core.remote import Server, SshGateway
+   with SshGateway(Server("10.0.0.5", 22, "support", key_path="/caminho/chave")) as gw:
+       redes = gw.networks()                         # descoberta automática (rotas, ARP, CPEs no ACS)
+       hosts = fp.scan(ips, [80, 443], gateway=gw)   # varredura roda no servidor
+       results = asyncio.run(engine.run_batch(..., proxy=gw.start_socks()))
+   ```
+   Pela linha de comando: `--via HOST:PORTA` em `run` e `scan`. No servidor só rodam comandos de leitura fixos (`ip`, `ss`, teste de porta com `bash`, `snmpget`).
+3. **Agente na rede do cliente** (um mini-PC ou VM rodando `python -m core run`), que recebe jobs do OLT Cloud e devolve o JSON. Resolve redes sem rota a partir da nuvem.
+
+Em testes num cliente real, o servidor do ACS alcançava as redes das CPEs (descobertas pelas conexões TR-069 abertas) e boa parte delas tinha a interface web acessível por ali. Já pelo IP público, nenhuma das CPEs amostradas respondia web. Ou seja, **sair pelo servidor do ACS costuma ser o caminho**.
 
 ---
 

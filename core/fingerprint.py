@@ -104,9 +104,16 @@ def check_port(ip: str, port: int, timeout: float = 1.0) -> bool:
         return False
 
 
-def _http_get(ip: str, port: int, path: str, timeout: float, tls: bool) -> tuple[int, dict, str]:
-    """GET bruto (aceita 401 e certificado inválido). Retorna (status, headers, corpo<=128KB)."""
-    sock = socket.create_connection((ip, port), timeout=timeout)
+def _direct_dial(ip: str, port: int, timeout: float) -> socket.socket:
+    return socket.create_connection((ip, port), timeout=timeout)
+
+
+def _http_get(ip: str, port: int, path: str, timeout: float, tls: bool, dial=None) -> tuple[int, dict, str]:
+    """GET bruto (aceita 401 e certificado inválido). Retorna (status, headers, corpo<=128KB).
+
+    `dial(ip, porta, timeout)` permite sair por outro caminho (ex.: túnel pelo servidor do cliente).
+    """
+    sock = (dial or _direct_dial)(ip, port, timeout)
     try:
         if tls:
             ctx = ssl.create_default_context()
@@ -158,13 +165,13 @@ def _dechunk(body: bytes) -> bytes:
     return out
 
 
-def probe_http(fp: Fingerprint, timeout: float = 2.5) -> None:
+def probe_http(fp: Fingerprint, timeout: float = 2.5, dial=None) -> None:
     tls = fp.port in (443, 8443)
     fp.scheme = "https" if tls else "http"
     path, texts = "/", []
     for _ in range(4):  # até 3 redirecionamentos
         try:
-            status, headers, body = _http_get(fp.ip, fp.port, path, timeout, tls)
+            status, headers, body = _http_get(fp.ip, fp.port, path, timeout, tls, dial)
         except ssl.SSLError:
             if tls:
                 return
@@ -200,7 +207,7 @@ def probe_http(fp: Fingerprint, timeout: float = 2.5) -> None:
     fp.raw["http_visible"] = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", no_code))).strip()[:4000]
     fp.raw["http_html"] = full[:40000]
     fp.raw["http_path"] = path
-    run_vendor_probes(fp, tls, timeout)
+    run_vendor_probes(fp, tls, timeout, dial)
 
 
 # --------------------------------------------------------------------------- sondas por fabricante
@@ -239,7 +246,7 @@ VENDOR_PROBES = [
 ]
 
 
-def run_vendor_probes(fp: Fingerprint, tls: bool, timeout: float) -> None:
+def run_vendor_probes(fp: Fingerprint, tls: bool, timeout: float, dial=None) -> None:
     page = fp.raw.get("http_html", "")
     for probe in VENDOR_PROBES:
         if not re.search(probe["marker"], page, re.IGNORECASE):
@@ -248,14 +255,14 @@ def run_vendor_probes(fp: Fingerprint, tls: bool, timeout: float) -> None:
         if probe["name"].startswith("Fiberhome") and "cgi-bin/ajax" not in page:
             # o marcador pode estar num .js; confere o xhr.js antes de chamar
             try:
-                _, _, extra_html = _http_get(fp.ip, fp.port, "/js/xhr.js", timeout, tls)
+                _, _, extra_html = _http_get(fp.ip, fp.port, "/js/xhr.js", timeout, tls, dial)
             except OSError:
                 pass
             if "cgi-bin/ajax" not in extra_html and "get_device_name" not in page:
                 continue
         for path, parser in probe["requests"]:
             try:
-                status, _, body = _http_get(fp.ip, fp.port, path, timeout, tls)
+                status, _, body = _http_get(fp.ip, fp.port, path, timeout, tls, dial)
             except OSError:
                 continue
             if status == 200:
@@ -469,15 +476,19 @@ def _add_source(fp: Fingerprint, name: str) -> None:
 
 
 def fingerprint_host(ip: str, port: int, *, ssdp_location: str | None = None, snmp_community: str | None = "public",
-                     use_upnp: bool = True, timeout: float = 2.5) -> Fingerprint:
+                     use_upnp: bool = True, timeout: float = 2.5, gateway=None) -> Fingerprint:
+    """Identifica um equipamento. Com `gateway` (servidor do cliente), tudo passa pelo servidor:
+    HTTP pelo túnel e SNMP rodando no servidor; UPnP fica de fora (UDP não passa no túnel)."""
     fp = Fingerprint(ip=ip, port=int(port), open=True)
-    probe_http(fp, timeout)
-    if use_upnp:
+    dial = gateway.dial if gateway is not None else None
+    probe_http(fp, timeout + (3 if gateway is not None else 0), dial)
+    if use_upnp and gateway is None:
         loc = ssdp_location or ssdp_unicast(ip)
         if loc:
             probe_upnp(fp, loc, timeout)
     if snmp_community:
-        desc = snmp_sysdescr(ip, snmp_community)
+        desc = (gateway.snmp_sysdescr(ip, snmp_community) if gateway is not None
+                else snmp_sysdescr(ip, snmp_community))
         if desc:
             fp.raw["snmp"] = desc
     identify(fp)
@@ -547,7 +558,7 @@ def scan(ips: list[str], ports: list[int], *, identify_models: bool = True, snmp
          workers: int = 64, connect_timeout: float = 1.0, retry_timeout: float = 3.0,
          include_silent: bool = True,
          progress: Callable[[int, int, Fingerprint | None], None] | None = None,
-         stop: threading.Event | None = None) -> list[Fingerprint]:
+         stop: threading.Event | None = None, gateway=None) -> list[Fingerprint]:
     """Varre ips×portas. Para cada IP usa a primeira porta aberta (na ordem dada).
 
     1ª passada rápida em todos os IPs; 2ª passada, com timeout maior, só nos IPs que a
@@ -557,6 +568,10 @@ def scan(ips: list[str], ports: list[int], *, identify_models: bool = True, snmp
     stop = stop or threading.Event()
     progress = progress or (lambda *_: None)
     total = len(ips)
+    if gateway is not None:
+        return _scan_via_gateway(ips, ports, gateway, identify_models=identify_models,
+                                 snmp_community=snmp_community, include_silent=include_silent,
+                                 connect_timeout=max(connect_timeout, 1.5), progress=progress, stop=stop)
     ssdp: dict[str, str] = {}
     ssdp_thread = None
     if identify_models:
@@ -640,3 +655,84 @@ def scan(ips: list[str], ports: list[int], *, identify_models: bool = True, snmp
     for fp in silent:
         progress(total, total, fp)
     return sorted(results + silent, key=ip_key)
+
+
+def _scan_via_gateway(ips, ports, gateway, *, identify_models, snmp_community, include_silent,
+                      connect_timeout, progress, stop) -> list[Fingerprint]:
+    """Varredura rodando NO servidor do cliente (testes TCP lá) + identificação pelo túnel."""
+    try:
+        own = gateway.own_ips()                  # o próprio servidor não é equipamento do cliente
+    except Exception:  # noqa: BLE001
+        own = set()
+    ips = [ip for ip in ips if ip not in own]
+    total = len(ips)
+    alive: dict[str, int] = {}
+    chunk = 256
+    for i in range(0, total, chunk):          # em blocos, para mostrar progresso e poder parar
+        if stop.is_set():
+            break
+        alive.update(gateway.tcp_scan(ips[i:i + chunk], ports, timeout=connect_timeout))
+        progress(min(i + chunk, total), total, None)
+    in_range = set(ips)
+    try:
+        macs = {ip: mac for ip, mac in gateway.arp().items() if ip in in_range}
+    except Exception:  # noqa: BLE001
+        macs = {}
+
+    def ip_key(fp):
+        return int(ipaddress.IPv4Address(fp.ip))
+
+    silent = []
+    if include_silent:
+        for ip, mac in macs.items():
+            if ip not in alive:
+                fp = Fingerprint(ip=ip, port=0, open=False, mac=mac)
+                fp.raw["note"] = "na rede, sem interface web nas portas informadas"
+                silent.append(fp)
+    if not identify_models or stop.is_set():
+        res = [Fingerprint(ip, p, open=True, mac=macs.get(ip, "")) for ip, p in alive.items()] + silent
+        for fp in res:
+            progress(total, total, fp)
+        return sorted(res, key=ip_key)
+
+    results: list[Fingerprint] = []
+    with ThreadPoolExecutor(max_workers=8) as ex:   # poucos em paralelo: tudo passa por uma conexão SSH
+        futs = [ex.submit(_safe_fingerprint, ip, p, snmp_community=snmp_community, gateway=gateway)
+                for ip, p in alive.items()]
+        for f in as_completed(futs):
+            fp = f.result()
+            fp.mac = macs.get(fp.ip, "") or fp.mac
+            results.append(fp)
+            progress(total, total, fp)
+            if stop.is_set():
+                break
+    for fp in silent:
+        progress(total, total, fp)
+    return sorted(results + silent, key=ip_key)
+
+
+def parse_targets(text: str, limit: int = 65536) -> list[str]:
+    """'192.168.1.0/24, 10.0.0.1-10.0.0.50; 172.16.5.9' -> lista de IPs (sem repetir, em ordem)."""
+    out: list[str] = []
+    seen = set()
+    for part in re.split(r"[,;\s]+", text or ""):
+        part = part.strip()
+        if not part:
+            continue
+        if "/" in part:
+            net = ipaddress.ip_network(part, strict=False)
+            hosts = [str(h) for h in (net.hosts() if net.num_addresses > 2 else net)]
+        elif "-" in part:
+            a, b = part.split("-", 1)
+            if "." not in b:                       # 10.0.0.1-50
+                b = a.rsplit(".", 1)[0] + "." + b
+            hosts = expand_range(a, b, limit)
+        else:
+            hosts = [str(ipaddress.IPv4Address(part))]
+        for h in hosts:
+            if h not in seen:
+                seen.add(h)
+                out.append(h)
+                if len(out) > limit:
+                    raise ValueError(f"Mais de {limit} IPs. Diminua as faixas.")
+    return out

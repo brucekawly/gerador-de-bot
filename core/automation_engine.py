@@ -308,7 +308,9 @@ class AutomationEngine:
                         browser_type: str = "firefox", timeout_ms: int = 15000,
                         progress_callback: ProgressCallback | None = None,
                         visible: bool = False,
-                        defaults: dict[str, str] | None = None) -> list[DeviceResult]:
+                        defaults: dict[str, str] | None = None,
+                        proxy: str | None = None) -> list[DeviceResult]:
+        """proxy: ex. 'socks5://127.0.0.1:1080' (acesso pelo servidor do cliente, ver core/remote.py)."""
         # (is_cancelled NÃO é zerado aqui: um "Parar" clicado antes do lote começar continua valendo.
         #  Use um AutomationEngine novo para cada lote.)
         self.defaults = dict(defaults or {})
@@ -338,7 +340,10 @@ class AutomationEngine:
                 async with browser_lock:
                     b = state["browser"]
                     if b is None or not b.is_connected():
-                        b = await launcher.launch(headless=not visible)
+                        opts = {"headless": not visible}
+                        if proxy:
+                            opts["proxy"] = {"server": proxy}
+                        b = await launcher.launch(**opts)
                         self.browser_launches += 1
                         state["browser"] = b
                     return b
@@ -480,7 +485,7 @@ class AutomationEngine:
                           credentials: list[Credential] | None = None,
                           browser_type: str = "firefox", timeout_ms: int = 15000,
                           progress_callback: ProgressCallback | None = None,
-                          defaults: dict[str, str] | None = None) -> DeviceResult:
+                          defaults: dict[str, str] | None = None, proxy: str | None = None) -> DeviceResult:
         results = await self.run_batch([device], script, credentials, browser_type,
-                                       timeout_ms, progress_callback, visible=True, defaults=defaults)
+                                       timeout_ms, progress_callback, visible=True, defaults=defaults, proxy=proxy)
         return results[0]

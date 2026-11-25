@@ -36,6 +36,43 @@ class DatabaseHandler:
                 conn.execute("ALTER TABLE templates ADD COLUMN credentials TEXT")
             if "defaults" not in cols:   # valores padrão de variáveis (v1.3)
                 conn.execute("ALTER TABLE templates ADD COLUMN defaults TEXT")
+            # servidores dos clientes (acesso aos equipamentos pela rede deles). Senha fica no cofre do sistema.
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS servers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    host TEXT NOT NULL,
+                    port INTEGER NOT NULL DEFAULT 22,
+                    user TEXT NOT NULL,
+                    auth TEXT NOT NULL DEFAULT 'key',
+                    key_path TEXT
+                )
+            ''')
+
+    # ------------------------------------------------------------------ servidores
+    def get_servers(self):
+        """[(id, name, host, port, user, auth, key_path)]"""
+        with self._connect() as conn:
+            return conn.execute("SELECT id, name, host, port, user, auth, COALESCE(key_path, '') "
+                                "FROM servers ORDER BY name").fetchall()
+
+    def get_server(self, server_id):
+        with self._connect() as conn:
+            return conn.execute("SELECT id, name, host, port, user, auth, COALESCE(key_path, '') "
+                                "FROM servers WHERE id=?", (server_id,)).fetchone()
+
+    def save_server(self, name, host, port, user, auth="key", key_path="", server_id=None):
+        with self._connect() as conn, conn:
+            if server_id:
+                conn.execute("UPDATE servers SET name=?, host=?, port=?, user=?, auth=?, key_path=? WHERE id=?",
+                             (name, host, int(port), user, auth, key_path, server_id))
+                return server_id
+            return conn.execute("INSERT INTO servers (name, host, port, user, auth, key_path) VALUES (?,?,?,?,?,?)",
+                                (name, host, int(port), user, auth, key_path)).lastrowid
+
+    def delete_server(self, server_id):
+        with self._connect() as conn, conn:
+            conn.execute("DELETE FROM servers WHERE id=?", (server_id,))
 
     def save_template(self, vendor, model, firmware, hardware, script, credentials="", defaults=""):
         with self._connect() as conn, conn:

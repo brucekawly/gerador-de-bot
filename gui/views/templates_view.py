@@ -11,6 +11,8 @@ from tkinter import filedialog, messagebox, ttk
 import customtkinter as ctk
 
 from core.automation_engine import validate_template
+from core.browser import codegen_cmd
+from core.remote import POOL
 from core.devices import (BUILTIN_VARS, Device, parse_credentials, parse_defaults, resolve_variables,
                           template_variables)
 from gui import theme
@@ -24,10 +26,10 @@ await page.goto("{{BASE_URL}}/")
 """
 
 RECORD_HELP = """Como gravar:
-1. Preencha abaixo o usuário/senha que você VAI digitar no roteador (o app troca por {{USERNAME}}/{{PASSWORD}}).
-2. Clique em Gravar: abre um navegador + o Playwright Inspector.
-3. Digite o IP do roteador, faça login e aplique as configurações (sem cliques desnecessários).
-4. Feche o navegador: o código aparece no editor. O IP gravado vira {{IP}} automaticamente."""
+1. Preencha o usuário/senha que você VAI digitar no equipamento (o app troca pelas variáveis de login).
+2. Informe o endereço do equipamento e, se ele só é alcançado pela rede do cliente, escolha o servidor.
+3. Clique em Gravar: abre o navegador; faça login e aplique as configurações (sem cliques desnecessários).
+4. Feche o navegador: o código aparece no editor, com o endereço trocado pela variável BASE_URL."""
 
 
 def clean_recording(code: str, user: str = "", password: str = "") -> str:
@@ -334,6 +336,15 @@ class TemplatesView(ctk.CTkFrame):
         rec_user.pack(side="left")
         rec_pass = ctk.CTkEntry(rr, placeholder_text="senha digitada", width=135, show="•")
         rec_pass.pack(side="left", padx=6)
+        rec_url = ctk.CTkEntry(rec, placeholder_text="endereço do equipamento (ex.: http://192.168.1.1)")
+        rec_url.pack(fill="x", padx=12, pady=(6, 0))
+        servers = {f"Servidor: {r[1]}": r for r in self.db.get_servers()}
+        rec_via = ctk.StringVar(value="Direto (rede deste PC)")
+        via_row = ctk.CTkFrame(rec, fg_color="transparent")
+        via_row.pack(fill="x", padx=12, pady=(6, 0))
+        ctk.CTkLabel(via_row, text="Acessar via", text_color=theme.MUTED, font=theme.font(11)).pack(side="left")
+        ctk.CTkOptionMenu(via_row, variable=rec_via, values=["Direto (rede deste PC)", *servers], width=190,
+                          dynamic_resizing=False).pack(side="left", padx=6)
         rb = ctk.CTkFrame(rec, fg_color="transparent")
         rb.pack(fill="x", padx=12, pady=8)
         rec_browser = ctk.StringVar(value="Chromium")
@@ -356,18 +367,25 @@ class TemplatesView(ctk.CTkFrame):
 
         def launch_recorder():
             browser = rec_browser.get().lower()
+            via = servers.get(rec_via.get())
+            start_url = rec_url.get().strip()
+            if start_url and "://" not in start_url:
+                start_url = "http://" + start_url
 
             def record():
                 fd, tmp = tempfile.mkstemp(suffix=".py", prefix="gravacao_")
                 os.close(fd)
                 try:
-                    cmd = [sys.executable, "-m", "playwright", "codegen", "-b", browser,
-                           "--target", "python-async", "-o", tmp]
-                    subprocess.run(cmd, check=False)
+                    proxy = POOL.proxy(via) if via else None     # gravação saindo pelo servidor do cliente
+                    subprocess.run(codegen_cmd(tmp, browser, proxy, start_url or None), check=False)
                     with open(tmp, encoding="utf-8") as f:
                         code = f.read()
                 except Exception as e:  # noqa: BLE001
-                    modal.after(0, lambda: messagebox.showerror("Gravação", f"Falha ao gravar: {e}", parent=modal))
+                    def fail(err=e):
+                        if modal.winfo_exists():
+                            btn_rec.configure(state="normal", text="Gravar")
+                            messagebox.showerror("Gravação", f"Falha ao gravar: {err}", parent=modal)
+                    modal.after(0, fail)
                     return
                 finally:
                     try:

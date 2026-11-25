@@ -1,34 +1,35 @@
 """Janela do Scanner de Rede: acha IPs com interface web e identifica fabricante/modelo/firmware."""
-import socket
 import threading
 from tkinter import messagebox, ttk
 
 import customtkinter as ctk
 
+import webbrowser
+
 from core import fingerprint as fpm
+from core.browser import open_url
+from core.remote import POOL, local_networks
 from gui import theme
+
+DIRECT_LABEL = "Direto (rede deste PC)"
 
 
 def _guess_range():
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))     # não envia nada; só descobre o IP local
-            ip = s.getsockname()[0]
-        base = ip.rsplit(".", 1)[0]
-        return f"{base}.1", f"{base}.254"
-    except OSError:
-        return "192.168.1.1", "192.168.1.254"
+    ip = fpm.local_ip()
+    return f"{ip.rsplit('.', 1)[0]}.0/24" if ip else "192.168.1.0/24"
 
 
 class ScannerDialog(ctk.CTkToplevel):
-    """on_add(list[Fingerprint], template_row|None) é chamado ao adicionar à fila."""
+    """on_add(list[Fingerprint], template_row|None, via_label) é chamado ao adicionar à fila."""
 
     COLS = ("ip", "porta", "fabricante", "modelo", "firmware", "mac", "fonte", "template")
     HEAD = ("IP", "Porta", "Fabricante", "Modelo", "Firmware", "MAC", "Identificado por", "Template sugerido")
     WIDTH = (115, 55, 100, 130, 120, 135, 310, 190)
 
-    def __init__(self, master, templates, on_add):
+    def __init__(self, master, templates, on_add, servers=None, via_label=DIRECT_LABEL):
         super().__init__(master)
+        self.servers = servers or {}          # {"Servidor: nome": linha do banco}
+        self.via_label = via_label if via_label in self.servers else DIRECT_LABEL
         self.title("Scanner de Rede")
         self.geometry("1250x660")
         self.minsize(900, 500)
@@ -51,22 +52,33 @@ class ScannerDialog(ctk.CTkToplevel):
         head.grid(row=0, column=0, sticky="ew", padx=20, pady=(16, 4))
         ctk.CTkLabel(head, text="Scanner de Rede", font=theme.font(20, "bold")).pack(anchor="w")
         ctk.CTkLabel(head, text="Encontra equipamentos com interface web e tenta identificar fabricante, modelo e "
-                                "firmware sem fazer login (página web, UPnP, SNMP).",
+                                "firmware sem fazer login. Pelo servidor do cliente, a varredura roda lá.",
                      text_color=theme.MUTED).pack(anchor="w")
 
         form = theme.card(self)
         form.grid(row=1, column=0, sticky="ew", padx=20, pady=10)
-        start, end = _guess_range()
-        self.e_start = self._field(form, "IP inicial", start, 0)
-        self.e_end = self._field(form, "IP final", end, 1)
-        self.e_ports = self._field(form, "Portas (em ordem)", "80, 443, 8080", 2, width=150)
-        self.e_snmp = self._field(form, "Community SNMP", "public", 3, width=110)
+        ctk.CTkLabel(form, text="Acessar via", text_color=theme.MUTED, font=theme.font(11)).grid(
+            row=0, column=0, padx=12, pady=(10, 0), sticky="w")
+        self.via_var = ctk.StringVar(value=self.via_label)
+        ctk.CTkOptionMenu(form, variable=self.via_var, values=[DIRECT_LABEL, *self.servers], width=210,
+                          dynamic_resizing=False).grid(row=1, column=0, padx=12, pady=(0, 12), sticky="w")
+        ctk.CTkLabel(form, text="Faixas (ex.: 192.168.1.0/24, 10.0.0.1-50)", text_color=theme.MUTED,
+                     font=theme.font(11)).grid(row=0, column=1, padx=12, pady=(10, 0), sticky="w")
+        tf = ctk.CTkFrame(form, fg_color="transparent")
+        tf.grid(row=1, column=1, padx=12, pady=(0, 12), sticky="ew")
+        self.e_targets = ctk.CTkEntry(tf, width=330)
+        self.e_targets.insert(0, _guess_range() if self.via_label == DIRECT_LABEL else "")
+        self.e_targets.pack(side="left", fill="x", expand=True)
+        self.btn_discover = theme.button(tf, "Descobrir redes", width=130, command=self._discover)
+        self.btn_discover.pack(side="left", padx=(8, 0))
+        self.e_ports = self._field(form, "Portas (em ordem)", "80, 443, 8080", 2, width=130)
+        self.e_snmp = self._field(form, "Community SNMP", "public", 3, width=100)
         self.var_ident = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(form, text="Identificar modelo", variable=self.var_ident).grid(
             row=1, column=4, padx=12, pady=(0, 12), sticky="w")
-        self.btn_scan = theme.button(form, "Iniciar varredura", "primary", command=self._start, width=170)
+        self.btn_scan = theme.button(form, "Iniciar varredura", "primary", command=self._start, width=160)
         self.btn_scan.grid(row=0, column=5, rowspan=2, padx=16, pady=12, sticky="e")
-        form.grid_columnconfigure(5, weight=1)
+        form.grid_columnconfigure(1, weight=1)
 
         table = theme.card(self)
         table.grid(row=2, column=0, sticky="nsew", padx=20, pady=(0, 6))
@@ -85,8 +97,10 @@ class ScannerDialog(ctk.CTkToplevel):
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
         sb.grid(row=0, column=1, sticky="ns", pady=8, padx=(0, 4))
-        self.empty = ctk.CTkLabel(table, text="Defina a faixa de IPs e clique em Iniciar varredura.",
-                                  text_color=theme.MUTED)
+        self.tree.bind("<Double-1>", self._open_selected)
+        self.empty = ctk.CTkLabel(table, text="Informe as faixas (ou clique em Descobrir redes) e depois em "
+                                              "Iniciar varredura.\nDois cliques num equipamento abrem a tela dele "
+                                              "no navegador.", text_color=theme.MUTED)
         self.empty.place(relx=0.5, rely=0.5, anchor="center")
 
         foot = ctk.CTkFrame(self, fg_color="transparent")
@@ -126,7 +140,9 @@ class ScannerDialog(ctk.CTkToplevel):
             self.btn_scan.configure(state="disabled", text="Parando...")
             return
         try:
-            ips = fpm.expand_range(self.e_start.get().strip(), self.e_end.get().strip())
+            ips = fpm.parse_targets(self.e_targets.get())
+            if not ips:
+                raise ValueError("Informe ao menos uma faixa de IPs (ou use Descobrir redes).")
             ports = [int(p) for p in self.e_ports.get().replace(";", ",").split(",") if p.strip()]
             if not ports:
                 raise ValueError("Informe ao menos uma porta.")
@@ -153,12 +169,20 @@ class ScannerDialog(ctk.CTkToplevel):
             else:
                 self.after(0, lambda f=fp: self._add_row(f))
 
+        row = self.servers.get(self.via_var.get())
+        if row:
+            self.lbl.configure(text=f"Conectando no servidor {row[1]}...")
+
         def run():
             try:
+                gw = POOL.get(row) if row else None
+                if gw is not None:
+                    self.after(0, lambda: self.lbl.configure(
+                        text=f"Varredura rodando no servidor {row[1]} ({total} IPs)..."))
                 res = fpm.scan(ips, ports, identify_models=ident, snmp_community=community,
-                               progress=progress, stop=self.stop)
+                               progress=progress, stop=self.stop, gateway=gw)
             except Exception as e:  # noqa: BLE001
-                self.after(0, lambda: messagebox.showerror("Scanner", f"Falha na varredura:\n{e}", parent=self))
+                self.after(0, lambda e=e: messagebox.showerror("Scanner", f"Falha na varredura:\n{e}", parent=self))
                 res = []
             self.after(0, lambda: self._done(res, ident))
         threading.Thread(target=run, daemon=True).start()
@@ -246,10 +270,96 @@ class ScannerDialog(ctk.CTkToplevel):
             messagebox.showinfo("Scanner", "Os equipamentos selecionados sugerem templates diferentes.\n"
                                 "Dica: adicione um modelo por vez para rodar cada um com o template certo.",
                                 parent=self)
-        self.on_add(chosen, template)
+        self.on_add(chosen, template, self.via_var.get())
         self._close()
 
     def _close(self):
         self.stop.set()
         self.grab_release()
         self.destroy()
+
+    # ------------------------------------------------------------------ descoberta automática de redes
+    def _discover(self):
+        row = self.servers.get(self.via_var.get())
+        self.btn_discover.configure(state="disabled", text="Procurando...")
+        self.lbl.configure(text=f"Descobrindo redes {'no servidor ' + row[1] if row else 'deste PC'}...")
+
+        def run():
+            try:
+                nets = POOL.get(row).networks() if row else local_networks()
+                err = None
+            except Exception as e:  # noqa: BLE001
+                nets, err = [], e
+            self.after(0, lambda: self._show_networks(nets, err, row))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _show_networks(self, nets, err, row):
+        if not self.winfo_exists():
+            return
+        self.btn_discover.configure(state="normal", text="Descobrir redes")
+        self.lbl.configure(text="")
+        if err:
+            messagebox.showerror("Descobrir redes", str(err), parent=self)
+            return
+        if not nets:
+            messagebox.showinfo("Descobrir redes", "Nenhuma rede privada encontrada. Informe as faixas à mão.",
+                                parent=self)
+            return
+        win = ctk.CTkToplevel(self)
+        win.title("Redes encontradas")
+        win.geometry("760x480")
+        win.transient(self)
+        win.after(100, win.grab_set)
+        where = f"no servidor {row[1]}" if row else "neste PC"
+        ctk.CTkLabel(win, text=f"Redes encontradas {where}", font=theme.font(17, "bold")).pack(
+            anchor="w", padx=18, pady=(16, 2))
+        ctk.CTkLabel(win, text="Marque as que quer varrer. Redes grandes vêm desmarcadas para não varrer "
+                               "milhares de IPs sem querer.", text_color=theme.MUTED).pack(anchor="w", padx=18)
+        box = ctk.CTkScrollableFrame(win, fg_color=theme.CARD)
+        box.pack(fill="both", expand=True, padx=18, pady=10)
+        checks = []
+        for n in nets:
+            var = ctk.BooleanVar(value=n["suggested"])
+            alive = f" · {n['alive']} vistos" if n.get("alive") else ""
+            ctk.CTkCheckBox(box, variable=var, text=f"{n['cidr']:<18}  {n['hosts']} IPs{alive}  —  {n['source']}",
+                            font=("Consolas", 12)).pack(anchor="w", pady=3)
+            checks.append((var, n))
+        total_lbl = ctk.CTkLabel(win, text="", text_color=theme.MUTED)
+        total_lbl.pack(anchor="w", padx=18)
+
+        def update_total(*_):
+            total = sum(n["hosts"] for v, n in checks if v.get())
+            total_lbl.configure(text=f"{total} IPs selecionados" + (" — acima de 4096 a varredura fica lenta"
+                                                                     if total > 4096 else ""))
+        for v, _ in checks:
+            v.trace_add("write", update_total)
+        update_total()
+
+        def use():
+            sel = [n["cidr"] for v, n in checks if v.get()]
+            self.e_targets.delete(0, "end")
+            self.e_targets.insert(0, ", ".join(sel))
+            win.destroy()
+        bar = ctk.CTkFrame(win, fg_color="transparent")
+        bar.pack(fill="x", padx=18, pady=(4, 16))
+        theme.button(bar, "Usar estas redes", "primary", width=160, command=use).pack(side="right")
+        theme.button(bar, "Cancelar", width=100, command=win.destroy).pack(side="right", padx=8)
+
+    # ------------------------------------------------------------------ abrir no navegador
+    def _open_selected(self, event=None):
+        iid = self.tree.identify_row(event.y) if event is not None else (self.tree.selection() or [None])[0]
+        fp = next((f for f in self.results if f.ip == iid and f.open), None)
+        if fp is None:
+            return
+        url = f"{fp.scheme}://{fp.ip}:{fp.port}/"
+        row = self.servers.get(self.via_var.get())
+        if not row:
+            webbrowser.open(url)
+            return
+
+        def run():
+            try:
+                open_url(url, POOL.proxy(row))
+            except Exception as e:  # noqa: BLE001
+                self.after(0, lambda e=e: messagebox.showerror("Abrir", str(e), parent=self))
+        threading.Thread(target=run, daemon=True).start()
