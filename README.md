@@ -4,6 +4,8 @@ Automação em lote de ONTs e roteadores pela interface web: você **grava** a c
 
 Feito em Python + [Playwright](https://playwright.dev/python/). Roda em **Windows, macOS e Linux**, com interface gráfica ou pela linha de comando.
 
+> **Novidades da v2.0:** acesso pelo servidor do cliente, varredura automática, retry, várias credenciais por template e visual novo. Veja o [CHANGELOG](CHANGELOG.md).
+
 ![Execução em lote](docs/img/execucao.png)
 
 ---

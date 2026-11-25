@@ -34,7 +34,7 @@ class DatabaseHandler:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(templates)")}
             if "credentials" not in cols:  # migração de bancos da v1.2.0
                 conn.execute("ALTER TABLE templates ADD COLUMN credentials TEXT")
-            if "defaults" not in cols:   # valores padrão de variáveis (v1.3)
+            if "defaults" not in cols:   # valores padrão de variáveis (v2.0)
                 conn.execute("ALTER TABLE templates ADD COLUMN defaults TEXT")
             # servidores dos clientes (acesso aos equipamentos pela rede deles). Senha fica no cofre do sistema.
             conn.execute('''
