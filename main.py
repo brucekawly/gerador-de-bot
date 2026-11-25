@@ -6,28 +6,19 @@ import subprocess
 import threading
 import re
 
+from gui import theme
+from core.platform_utils import no_window_flags
 from database.db_handler import DatabaseHandler
 from gui.views.templates_view import TemplatesView
 from gui.views.execution_view import ExecutionView
 
-# Settings for Playwright in Frozen EXE
-if getattr(sys, 'frozen', False):
-    # Use a local folder next to the EXE for portability
-    executable_dir = os.path.dirname(sys.executable)
-    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(executable_dir, "ms-playwright")
+APP_VERSION = "1.3.0"
 
-ctk.set_appearance_mode("System")
-ctk.set_default_color_theme("blue")
+theme.setup()   # tema claro + cores e fonte do OLT Cloud
 
 def install_browsers(browser_name, progress_callback, result_callback):
     try:
-        # Use the playwright CLI to install the specific browser
-        if getattr(sys, 'frozen', False):
-            from playwright._impl._driver import compute_driver_executable
-            driver_executable, driver_cli = compute_driver_executable()
-            cmd = [driver_executable, driver_cli, "install", browser_name]
-        else:
-            cmd = [sys.executable, "-m", "playwright", "install", browser_name]
+        cmd = [sys.executable, "-m", "playwright", "install", browser_name]
             
         # We need to capture the output to show progress
         process = subprocess.Popen(
@@ -35,7 +26,7 @@ def install_browsers(browser_name, progress_callback, result_callback):
             stdout=subprocess.PIPE, 
             stderr=subprocess.STDOUT, 
             text=True,
-            creationflags=0x08000000 if os.name == 'nt' else 0
+            creationflags=no_window_flags()
         )
         
         # Regex to find percentage (e.g. " 45%")
@@ -62,131 +53,143 @@ class TR069ProvisionerApp(ctk.CTk):
         super().__init__()
 
         self.title("Gerador de BOT")
-        self.geometry("1500x800")
+        self.geometry("1440x860")
+        self.minsize(1200, 700)
         
-        # Check for Playwright browsers
-        self.after(500, lambda: self.download_browser_if_missing("firefox"))
-
         # Database initialization
         self.db = DatabaseHandler()
+        self._browsers_ok = set()
 
         # Grid configuration
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        # Sidebar create
-        self.sidebar_frame = ctk.CTkFrame(self, width=200, corner_radius=0)
+        # ---- barra lateral
+        self.sidebar_frame = ctk.CTkFrame(self, width=210, corner_radius=0, fg_color=theme.SIDEBAR, border_width=0)
         self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
         self.sidebar_frame.grid_rowconfigure(4, weight=1)
 
-        self.logo_label = ctk.CTkLabel(self.sidebar_frame, text="Gerador de BOT", font=ctk.CTkFont(size=20, weight="bold"))
-        self.logo_label.grid(row=0, column=0, padx=20, pady=(20, 10))
+        ctk.CTkLabel(self.sidebar_frame, text="Gerador de BOT", font=theme.font(19, "bold")).grid(
+            row=0, column=0, padx=18, pady=(22, 2), sticky="w")
+        ctk.CTkLabel(self.sidebar_frame, text=f"v{APP_VERSION} · ONTs e roteadores", text_color=theme.MUTED,
+                     font=theme.font(11)).grid(row=1, column=0, padx=18, pady=(0, 18), sticky="w")
 
-        self.btn_templates = ctk.CTkButton(self.sidebar_frame, text="Gerenciador de Templates", command=self.show_templates)
-        self.btn_templates.grid(row=1, column=0, padx=20, pady=10)
+        self.nav = {}
+        for r, (key, label) in enumerate((("templates", "Templates"), ("execution", "Execução em lote")), start=2):
+            b = ctk.CTkButton(self.sidebar_frame, text=label, anchor="w", height=38, width=180,
+                              fg_color="transparent", text_color=theme.TEXT_2,
+                              hover_color=theme.HOVER, font=theme.font(13), corner_radius=8,
+                              command=lambda k=key: self.show_view(k))
+            b.grid(row=r, column=0, padx=14, pady=2, sticky="ew")
+            self.nav[key] = b
 
-        self.btn_execution = ctk.CTkButton(self.sidebar_frame, text="Execução em Lote", command=self.show_execution)
-        self.btn_execution.grid(row=2, column=0, padx=20, pady=10)
+        ctk.CTkLabel(self.sidebar_frame, text="Tema", text_color=theme.MUTED, font=theme.font(11)).grid(
+            row=5, column=0, padx=18, sticky="w")
+        self.appearance_mode_optionemenu = ctk.CTkOptionMenu(
+            self.sidebar_frame, values=["Claro", "Escuro", "Sistema"], width=180,
+            command=self.change_appearance_mode_event)
+        self.appearance_mode_optionemenu.set("Claro")
+        self.appearance_mode_optionemenu.grid(row=6, column=0, padx=14, pady=(2, 20))
 
-        self.appearance_mode_optionemenu = ctk.CTkOptionMenu(self.sidebar_frame, values=["Light", "Dark", "System"], command=self.change_appearance_mode_event)
-        self.appearance_mode_optionemenu.grid(row=5, column=0, padx=20, pady=(10, 20))
+        # ---- conteúdo
+        self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
+        self.main_frame.grid(row=0, column=1, sticky="nsew", padx=22, pady=18)
 
-        # Copyright Footer
-        self.lbl_copyright = ctk.CTkLabel(self.sidebar_frame, text="© 2026 Bruce Kawly\nAll Rights Reserved", font=ctk.CTkFont(size=10, slant="italic"), text_color="gray")
-        self.lbl_copyright.grid(row=6, column=0, padx=20, pady=(0, 20), sticky="s")
-
-        # Main content frame
-        self.main_frame = ctk.CTkFrame(self, corner_radius=10)
-        self.main_frame.grid(row=0, column=1, sticky="nsew", padx=20, pady=20)
-
-        # Initialize Views
         self.views = {
             "templates": TemplatesView(self.main_frame, self.db),
-            "execution": ExecutionView(self.main_frame, self.db)
+            "execution": ExecutionView(self.main_frame, self.db),
         }
+        self.views["templates"].on_change = self.views["execution"].refresh_templates
+        self.show_view("execution" if self.db.get_all_templates() else "templates")
 
-        # Show default view
-        self.show_templates()
+    def change_appearance_mode_event(self, label: str):
+        ctk.set_appearance_mode({"Escuro": "Dark", "Claro": "Light", "Sistema": "System"}[label])
+        for v in self.views.values():
+            if hasattr(v, "on_theme_change"):
+                v.on_theme_change()
 
-    def change_appearance_mode_event(self, new_appearance_mode: str):
-        ctk.set_appearance_mode(new_appearance_mode)
+    def show_view(self, key):
+        for v in self.views.values():
+            v.pack_forget()
+        if key == "execution":
+            self.views["execution"].refresh_templates()
+        self.views[key].pack(fill="both", expand=True)
+        for k, b in self.nav.items():
+            b.configure(fg_color=(theme.ACCENT_SOFT if k == key else "transparent"),
+                        text_color=(theme.ACCENT_TEXT if k == key else theme.TEXT_2),
+                        font=theme.font(13, "bold" if k == key else "normal"))
 
-    def _hide_all_views(self):
-        for view in self.views.values():
-            view.pack_forget()
-
+    # compatibilidade
     def show_templates(self):
-        self._hide_all_views()
-        self.views["templates"].pack(fill="both", expand=True)
-        # Change button color to active
-        self.btn_templates.configure(fg_color=["#3B8ED0", "#1F6AA5"])
-        self.btn_execution.configure(fg_color="transparent")
+        self.show_view("templates")
 
     def show_execution(self):
-        self._hide_all_views()
-        self.views["execution"].refresh_templates()
-        self.views["execution"].pack(fill="both", expand=True)
-        self.btn_execution.configure(fg_color=["#3B8ED0", "#1F6AA5"])
-        self.btn_templates.configure(fg_color="transparent")
+        self.show_view("execution")
 
     def download_browser_if_missing(self, browser_name="firefox", callback=None):
-        if getattr(sys, 'frozen', False):
-            # In PyInstaller frozen bundle, browsers are saved next to the exe
-            browser_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-            # We assume if the specific folder inside ms-playwright roughly matching the name exists, it's there.
-            # A safer but simpler heuristic: Just let playwright install it if it's missing. Or we check the directory contents.
-            is_missing = True
-            if browser_path and os.path.exists(browser_path):
-                # Search for a folder matching the browser name
-                for folder in os.listdir(browser_path):
-                    if browser_name in folder.lower():
-                        is_missing = False
-                        break
-            
-            if is_missing:
-                # Ask user
-                browser_display = browser_name.capitalize()
-                if messagebox.askyesno("Configuração Inicial", 
-                    f"O motor de navegação ({browser_display}) não foi encontrado.\n\nDeseja baixar e configurar automaticamente agora?\n(Será necessário apenas uma vez)"):
-                    
-                    progress_modal = ctk.CTkToplevel(self)
-                    progress_modal.title(f"Baixando {browser_display}...")
-                    progress_modal.geometry("400x150")
-                    progress_modal.transient(self)
-                    progress_modal.grab_set()
-                    
-                    ctk.CTkLabel(progress_modal, text=f"Baixando {browser_display}...\nIsso pode levar alguns minutos.", font=ctk.CTkFont(size=14)).pack(pady=(20, 10))
-                    
-                    progress_bar = ctk.CTkProgressBar(progress_modal, width=300)
-                    progress_bar.set(0)
-                    progress_bar.pack(pady=10)
-                    
-                    lbl_percent = ctk.CTkLabel(progress_modal, text="0%")
-                    lbl_percent.pack()
-                    
-                    def update_progress(val):
-                        progress_bar.set(val)
-                        lbl_percent.configure(text=f"{int(val*100)}%")
-                        self.update_idletasks()
-                    
-                    def on_done(success):
-                        progress_modal.destroy()
-                        if success:
-                            messagebox.showinfo("Sucesso", f"Motor {browser_display} configurado! O app está pronto.")
-                            if callback:
-                                callback()
-                        else:
-                            messagebox.showerror("Erro", "Falha ao instalar motor. Verifique sua conexão.")
-                            
-                    threading.Thread(target=install_browsers, args=(browser_name, update_progress, on_done), daemon=True).start()
-            else:
-                # Browser already exists
-                if callback:
-                    callback()
-        else:
-            # We assume dev environment has playwright installed globally
+        """Confere se o navegador do Playwright está instalado; se não, oferece instalar (uma vez só)."""
+        browser_name = browser_name.lower()
+        if browser_name in self._browsers_ok:
             if callback:
                 callback()
+            return
+
+        def check():
+            ok = browser_installed(browser_name)
+            self.after(0, lambda: on_checked(ok))
+
+        def on_checked(ok):
+            if ok:
+                self._browsers_ok.add(browser_name)
+                if callback:
+                    callback()
+                return
+            display = browser_name.capitalize()
+            if not messagebox.askyesno("Navegador não instalado",
+                                       f"O navegador {display} do Playwright não está instalado.\n\n"
+                                       "Baixar e instalar agora? (só precisa uma vez)"):
+                return
+            modal = ctk.CTkToplevel(self)
+            modal.title(f"Instalando {display}")
+            modal.geometry("400x150")
+            modal.transient(self)
+            modal.after(100, modal.grab_set)
+            ctk.CTkLabel(modal, text=f"Baixando {display}...\nIsso pode levar alguns minutos.",
+                         font=theme.font(14)).pack(pady=(20, 10))
+            bar = ctk.CTkProgressBar(modal, width=300)
+            bar.set(0)
+            bar.pack(pady=10)
+            pct = ctk.CTkLabel(modal, text="0%")
+            pct.pack()
+
+            def progress(val):
+                self.after(0, lambda: (bar.set(val), pct.configure(text=f"{int(val * 100)}%")))
+
+            def done(success):
+                def ui():
+                    modal.destroy()
+                    if success:
+                        self._browsers_ok.add(browser_name)
+                        if callback:
+                            callback()
+                    else:
+                        messagebox.showerror("Erro", f"Falha ao instalar o {display}.\n"
+                                             f"Rode no terminal: python -m playwright install {browser_name}")
+                self.after(0, ui)
+            threading.Thread(target=install_browsers, args=(browser_name, progress, done), daemon=True).start()
+
+        threading.Thread(target=check, daemon=True).start()
+
+
+def browser_installed(name: str) -> bool:
+    """True se o executável do navegador do Playwright existe nesta máquina."""
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            return os.path.exists(getattr(p, name).executable_path)
+    except Exception:  # noqa: BLE001
+        return False
+
 
 if __name__ == "__main__":
     app = TR069ProvisionerApp()

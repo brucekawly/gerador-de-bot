@@ -1,0 +1,8 @@
+Fonte Lato (LatoLatin-Regular.ttf, LatoLatin-Bold.ttf)
+
+Copyright (c) 2010-2015, Łukasz Dziedzic (dziedzic@typoland.com), com Reserved Font Name "Lato".
+Licenciada sob a SIL Open Font License, versão 1.1: https://openfontlicense.org/open-font-license-official-text/
+
+Os arquivos .ttf foram convertidos sem alteração dos desenhos a partir dos .woff distribuídos com o
+Fomantic UI (a mesma fonte usada pelo OLT Cloud web). A fonte não é vendida separadamente; vai junto
+com o app só para exibir a interface.

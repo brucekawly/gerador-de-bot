@@ -1,352 +1,423 @@
-import customtkinter as ctk
-import tkinter as tk
-from tkinter import ttk, messagebox
-import threading
-import subprocess
-import os
-import sys
+"""Gerenciador de Templates (receitas de automação)."""
 import json
-from tkinter import filedialog
+import os
 import re
+import subprocess
+import sys
+import tempfile
+import threading
+from tkinter import filedialog, messagebox, ttk
+
+import customtkinter as ctk
+
+from core.automation_engine import validate_template
+from core.devices import (BUILTIN_VARS, Device, parse_credentials, parse_defaults, resolve_variables,
+                          template_variables)
+from gui import theme
+
+NEW_TEMPLATE_TIP = """# Variáveis: {{BASE_URL}} (= {{SCHEME}}://{{IP}}:{{PORT}}) {{USERNAME}} {{PASSWORD}}
+# Porta/protocolo padrão deste modelo: em "Valores padrão" ao lado (ex.: PORT=8080, SCHEME=https)
+# + qualquer coluna da planilha, ex.: {{SSID}} {{SENHA_WIFI}} {{VLAN}}
+# Login falhou de um jeito que o bot não percebe? use:  raise LoginError("motivo")
+await page.goto("{{BASE_URL}}/")
+"""
+
+RECORD_HELP = """Como gravar:
+1. Preencha abaixo o usuário/senha que você VAI digitar no roteador (o app troca por {{USERNAME}}/{{PASSWORD}}).
+2. Clique em Gravar: abre um navegador + o Playwright Inspector.
+3. Digite o IP do roteador, faça login e aplique as configurações (sem cliques desnecessários).
+4. Feche o navegador: o código aparece no editor. O IP gravado vira {{IP}} automaticamente."""
+
+
+def clean_recording(code: str, user: str = "", password: str = "") -> str:
+    """Extrai só as ações do código do codegen e troca IP/usuário/senha por variáveis."""
+    lines, out, inside = code.splitlines(), [], False
+    for line in lines:
+        if re.search(r"(async\s+)?def run\(playwright", line):
+            inside = True
+            continue
+        if inside:
+            if line.strip() and not line.startswith("    "):
+                break
+            cleaned = line[4:] if line.startswith("    ") else line
+            if any(s in cleaned for s in ("browser = await", "context = await", "page = await",
+                                          "await context.close()", "await browser.close()",
+                                          "browser = playwright", "context = browser")):
+                continue
+            out.append(cleaned)
+    script = "\n".join(out).strip("\n")
+    # http(s)://IP[:porta] -> {{BASE_URL}} (porta/protocolo vêm dos valores padrão do template)
+    script = re.sub(r"https?://(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?::\d+)?", "{{BASE_URL}}", script)
+    script = re.sub(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?::(\d+))?\b",
+                    lambda m: "{{IP}}:{{PORT}}" if m.group(1) else "{{IP}}", script)
+    for value, var in ((password, "{{PASSWORD}}"), (user, "{{USERNAME}}")):
+        if value:
+            script = re.sub(r'(["\'])' + re.escape(value) + r'\1', lambda m: f"{m.group(1)}{var}{m.group(1)}", script)
+    return script
+
 
 class TemplatesView(ctk.CTkFrame):
+    COLS = ("ID", "Vendor", "Model", "Firmware", "Hardware", "Acesso", "Vars", "Creds")
+    HEAD = ("ID", "Fabricante", "Modelo", "Firmware", "Hardware", "Acesso", "Colunas da planilha", "Credenciais")
+    WIDTH = (50, 140, 160, 140, 90, 110, 240, 90)
+
     def __init__(self, master, db):
-        super().__init__(master, corner_radius=10)
+        super().__init__(master, corner_radius=10, fg_color="transparent")
         self.db = db
-        
-        # Configure layout
+        self.on_change = None   # callback para a tela de execução recarregar
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # Header
-        self.header_frame = ctk.CTkFrame(self)
-        self.header_frame.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="ew")
-        
-        ctk.CTkLabel(self.header_frame, text="Gerenciador de Receitas (Templates)", font=ctk.CTkFont(size=20, weight="bold")).pack(side="left", padx=10, pady=10)
-        
-        self.btn_new = ctk.CTkButton(self.header_frame, text="+ Novo Template", command=self.open_new_template_modal)
-        self.btn_new.pack(side="right", padx=10, pady=10)
-        
-        self.btn_import = ctk.CTkButton(self.header_frame, text="📥 Importar", command=self.import_templates, fg_color="#1F6AA5", hover_color="#144870")
-        self.btn_import.pack(side="right", padx=5, pady=10)
-        
-        self.btn_export = ctk.CTkButton(self.header_frame, text="📤 Exportar", command=self.export_templates, fg_color="#1F6AA5", hover_color="#144870")
-        self.btn_export.pack(side="right", padx=5, pady=10)
-        
-        self.btn_edit = ctk.CTkButton(self.header_frame, text="✏️ Editar", command=self.edit_template, fg_color="#D1911B", hover_color="#9C6B11")
-        self.btn_edit.pack(side="right", padx=5, pady=10)
-        
-        self.btn_delete = ctk.CTkButton(self.header_frame, text="🗑️ Deletar", command=self.delete_template, fg_color="#C93B3B", hover_color="#912828")
-        self.btn_delete.pack(side="right", padx=10, pady=10)
+        head = ctk.CTkFrame(self, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 10))
+        ctk.CTkLabel(head, text="Templates", font=theme.font(22, "bold")).pack(side="left")
+        ctk.CTkLabel(head, text="  receitas de automação por modelo de equipamento", text_color=theme.MUTED).pack(
+            side="left", pady=(6, 0))
+        theme.button(head, "+ Novo template", "primary", width=150,
+                     command=self.open_new_template_modal).pack(side="right")
+        theme.button(head, "Importar", width=90, command=self.import_templates).pack(side="right", padx=8)
+        theme.button(head, "Exportar", width=90, command=self.export_templates).pack(side="right")
 
-        # Treeview (Table)
-        self.tree_frame = ctk.CTkFrame(self)
-        self.tree_frame.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
-        
-        # Using ttk.Treeview for tabular data (CTk lacks a native table view yet)
-        style = ttk.Style()
-        style.theme_use("default")
-        style.configure("Treeview", background="#2a2d2e", foreground="white", rowheight=25, fieldbackground="#343638", bordercolor="#343638", borderwidth=0)
-        style.map('Treeview', background=[('selected', '#22559b')])
-        style.configure("Treeview.Heading", background="#565b5e", foreground="white", relief="flat")
-        style.map("Treeview.Heading", background=[('active', '#3484F0')])
+        card = theme.card(self)
+        card.grid(row=1, column=0, sticky="nsew")
+        card.grid_rowconfigure(0, weight=1)
+        card.grid_columnconfigure(0, weight=1)
+        theme.apply_tree_style()
+        self.tree = ttk.Treeview(card, columns=self.COLS, show="headings", selectmode="browse")
+        for c, h, w in zip(self.COLS, self.HEAD, self.WIDTH):
+            self.tree.heading(c, text=h, anchor="w")
+            self.tree.column(c, width=w, minwidth=40, anchor="w", stretch=(c == "Vars"))
+        sb = ttk.Scrollbar(card, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=10)
+        sb.grid(row=0, column=1, sticky="ns", pady=10, padx=(0, 6))
+        self.tree.bind("<Double-1>", lambda e: self.edit_template())
+        self.tree.bind("<Delete>", lambda e: self.delete_template())
+        self.tree.bind("<Button-3>", self._menu)
 
-        self.tree = ttk.Treeview(self.tree_frame, columns=("ID", "Vendor", "Model", "Firmware", "Hardware"), show="headings")
-        self.tree.heading("ID", text="ID", anchor="center")
-        self.tree.heading("Vendor", text="Fabricante", anchor="w")
-        self.tree.heading("Model", text="Modelo", anchor="w")
-        self.tree.heading("Firmware", text="Firmware", anchor="w")
-        self.tree.heading("Hardware", text="Hardware", anchor="w")
-        
-        self.tree.column("ID", width=50, minwidth=50, stretch=False, anchor="center")
-        self.tree.column("Vendor", width=250, minwidth=150, stretch=False, anchor="w")
-        self.tree.column("Model", width=250, minwidth=150, stretch=False, anchor="w")
-        self.tree.column("Firmware", width=200, minwidth=150, stretch=False, anchor="w")
-        self.tree.column("Hardware", width=200, minwidth=150, stretch=True, anchor="w")
-        self.tree.pack(fill="both", expand=True, padx=10, pady=10)
+        foot = ctk.CTkFrame(self, fg_color="transparent")
+        foot.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        ctk.CTkLabel(foot, text="Dois cliques para editar · botão direito para mais opções",
+                     text_color=theme.MUTED, font=theme.font(11)).pack(side="left")
+        theme.button(foot, "Excluir", "ghost", width=80, text_color=theme.ERROR,
+                     command=self.delete_template).pack(side="right")
+        theme.button(foot, "Duplicar", "ghost", width=80, command=self.duplicate_template).pack(side="right")
+        theme.button(foot, "Editar", "ghost", width=80, command=self.edit_template).pack(side="right")
 
+        self.empty = ctk.CTkLabel(card, text="Nenhum template ainda.\nClique em + Novo template e grave as ações "
+                                             "num roteador de referência.", text_color=theme.MUTED)
         self.refresh_table()
 
+    def on_theme_change(self):
+        theme.apply_tree_style()
+
+    def _changed(self):
+        self.refresh_table()
+        if self.on_change:
+            self.on_change()
+
     def refresh_table(self):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        for row in self.db.get_all_templates():
-            self.tree.insert("", "end", values=row[:5])
+        self.tree.delete(*self.tree.get_children())
+        rows = self.db.get_all_templates()
+        for r in rows:
+            custom = sorted(template_variables(r[5]) - BUILTIN_VARS)
+            n_creds = len(parse_credentials(r[6]))
+            d = resolve_variables(Device("x"), None, parse_defaults(r[7]))
+            custom = sorted(set(custom) - set(parse_defaults(r[7])))
+            self.tree.insert("", "end", iid=str(r[0]), values=(
+                r[0], r[1], r[2], r[3] or "", r[4] or "", f"{d['SCHEME']} :{d['PORT']}", ", ".join(custom) or "—",
+                n_creds or "admin/admin"))
+        if rows:
+            self.empty.place_forget()
+        else:
+            self.empty.place(relx=0.5, rely=0.5, anchor="center")
+
+    def _selected_id(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Templates", "Selecione um template na lista.")
+            return None
+        return int(sel[0])
+
+    def _menu(self, event):
+        import tkinter as tk
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        self.tree.selection_set(iid)
+        m = tk.Menu(self, tearoff=0)
+        m.add_command(label="Editar", command=self.edit_template)
+        m.add_command(label="Duplicar (nova versão de firmware)", command=self.duplicate_template)
+        m.add_separator()
+        m.add_command(label="Excluir", command=self.delete_template)
+        m.tk_popup(event.x_root, event.y_root)
 
     def delete_template(self):
-        selected_item = self.tree.selection()
-        if not selected_item:
-            messagebox.showwarning("Aviso", "Selecione um template na lista para deletar.")
+        tid = self._selected_id()
+        if tid is None:
             return
-            
-        # Get values of selected row. Index 0 is the ID.
-        item_values = self.tree.item(selected_item[0], "values")
-        template_id = int(item_values[0])
-        template_name = f"{item_values[1]} {item_values[2]}"
-        
-        confirm = messagebox.askyesno("Confirmar Exclusão", f"Tem certeza que deseja deletar o template:\n{template_name}?")
-        if confirm:
-            self.db.delete_template(template_id)
-            self.refresh_table()
-            messagebox.showinfo("Sucesso", "Template deletado com sucesso!")
+        r = self.db.get_template(tid)
+        if messagebox.askyesno("Excluir template", f"Excluir o template [{tid}] {r[1]} {r[2]}?\n"
+                                                   "Essa ação não pode ser desfeita."):
+            self.db.delete_template(tid)
+            self._changed()
 
     def edit_template(self):
-        selected_item = self.tree.selection()
-        if not selected_item:
-            messagebox.showwarning("Aviso", "Selecione um template na lista para editar.")
-            return
-            
-        item_values = self.tree.item(selected_item[0], "values")
-        template_id = int(item_values[0])
-        self.open_new_template_modal(template_id=template_id)
+        tid = self._selected_id()
+        if tid is not None:
+            self.open_new_template_modal(template_id=tid)
 
+    def duplicate_template(self):
+        tid = self._selected_id()
+        if tid is None:
+            return
+        r = self.db.get_template(tid)
+        new_id = self.db.save_template(r[1], r[2] + " (cópia)", r[3], r[4], r[5], r[6], r[7])
+        self._changed()
+        self.tree.selection_set(str(new_id))
+        self.open_new_template_modal(template_id=new_id)
+
+    # ------------------------------------------------------------------ importar / exportar
     def export_templates(self):
-        templates = self.db.get_all_templates()
-        if not templates:
-            messagebox.showwarning("Aviso", "Não há templates para exportar.")
+        rows = self.db.get_all_templates()
+        if not rows:
+            messagebox.showwarning("Exportar", "Não há templates para exportar.")
             return
-            
-        filepath = filedialog.asksaveasfilename(
-            title="Exportar Templates",
-            defaultextension=".json",
-            filetypes=[("JSON Files", "*.json")]
-        )
-        if not filepath:
+        path = filedialog.asksaveasfilename(title="Exportar templates", defaultextension=".json",
+                                            filetypes=[("JSON", "*.json")])
+        if not path:
             return
-            
-        export_data = []
-        for row in templates:
-            export_data.append({
-                "vendor": row[1],
-                "model": row[2],
-                "firmware": row[3],
-                "hardware": row[4],
-                "script": row[5]
-            })
-            
+        with_creds = any(r[6] for r in rows) and messagebox.askyesno(
+            "Exportar", "Incluir as credenciais (usuário/senha) no arquivo?\n\n"
+                        "Escolha Não se for compartilhar o arquivo com outras pessoas.")
+        data = [{"vendor": r[1], "model": r[2], "firmware": r[3], "hardware": r[4], "script": r[5],
+                 **({"defaults": r[7]} if r[7] else {}),
+                 **({"credentials": r[6]} if with_creds and r[6] else {})} for r in rows]
         try:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(export_data, f, indent=4)
-            messagebox.showinfo("Sucesso", f"{len(export_data)} templates exportados com sucesso!")
-        except Exception as e:
-            messagebox.showerror("Erro", f"Erro ao exportar: {str(e)}")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            messagebox.showinfo("Exportar", f"{len(data)} template(s) exportado(s).")
+        except OSError as e:
+            messagebox.showerror("Exportar", f"Erro ao exportar: {e}")
 
     def import_templates(self):
-        filepath = filedialog.askopenfilename(
-            title="Importar Templates",
-            filetypes=[("JSON Files", "*.json")]
-        )
-        if not filepath:
+        path = filedialog.askopenfilename(title="Importar templates", filetypes=[("JSON", "*.json")])
+        if not path:
             return
-            
         try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                import_data = json.load(f)
-                
-            count = 0
-            for item in import_data:
-                if 'vendor' in item and 'model' in item and 'script' in item:
-                    self.db.save_template(
-                        item['vendor'],
-                        item['model'],
-                        item.get('firmware', ''),
-                        item.get('hardware', ''),
-                        item['script']
-                    )
-                    count += 1
-            
-            self.refresh_table()
-            messagebox.showinfo("Sucesso", f"{count} templates importados com sucesso!")
-        except Exception as e:
-            messagebox.showerror("Erro", f"Erro ao importar: {str(e)}")
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            items = [i for i in data if isinstance(i, dict) and i.get("vendor") and i.get("model") and i.get("script")]
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Importar", f"Arquivo inválido: {e}")
+            return
+        if not items:
+            messagebox.showwarning("Importar", "Nenhum template válido no arquivo.")
+            return
+        names = "\n".join(f"• {i['vendor']} {i['model']} {i.get('firmware') or ''}" for i in items[:15])
+        broken = [i for i in items if validate_template(i["script"])]
+        if not messagebox.askyesno(
+                "Importar templates",
+                f"{len(items)} template(s):\n{names}{'…' if len(items) > 15 else ''}\n\n"
+                "⚠ Templates são código Python e rodam no seu computador com as suas permissões.\n"
+                "Só importe arquivos de fontes em que você confia." +
+                (f"\n\n{len(broken)} deles têm erro de sintaxe (serão importados para você corrigir)." if broken else "") +
+                "\n\nImportar?", icon="warning"):
+            return
+        for i in items:
+            self.db.save_template(i["vendor"], i["model"], i.get("firmware", ""), i.get("hardware", ""),
+                                  i["script"], i.get("credentials", ""), i.get("defaults", ""))
+        self._changed()
+        messagebox.showinfo("Importar", f"{len(items)} template(s) importado(s).")
 
+    # ------------------------------------------------------------------ editor
     def open_new_template_modal(self, template_id=None):
+        row = self.db.get_template(template_id) if template_id else None
         modal = ctk.CTkToplevel(self)
-        modal.title("Editar Template" if template_id else "Novo Template")
-        modal.geometry("650x800")
+        modal.title("Editar template" if row else "Novo template")
+        modal.geometry("1040x780")
+        modal.minsize(820, 640)
         modal.transient(self.winfo_toplevel())
-        modal.grab_set()
+        modal.after(100, modal.grab_set)
+        modal.grid_columnconfigure(0, weight=3)
+        modal.grid_columnconfigure(1, weight=2)
+        modal.grid_rowconfigure(1, weight=1)
 
-        title_text = "Editar Template" if template_id else "Adicionar Novo Template"
-        ctk.CTkLabel(modal, text=title_text, font=ctk.CTkFont(size=18, weight="bold")).pack(pady=20)
+        ctk.CTkLabel(modal, text=(f"Editar template [{row[0]}]" if row else "Novo template"),
+                     font=theme.font(20, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(16, 8))
 
-        form_frame = ctk.CTkFrame(modal)
-        form_frame.pack(fill="x", padx=20, pady=10)
+        # ---- coluna esquerda: código
+        left = ctk.CTkFrame(modal, fg_color="transparent")
+        left.grid(row=1, column=0, sticky="nsew", padx=(20, 8))
+        left.grid_rowconfigure(2, weight=1)
+        left.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(left, text="Script de automação (Python + Playwright)", font=theme.font(13, "bold")).grid(
+            row=0, column=0, sticky="w")
+        chips = ctk.CTkFrame(left, fg_color="transparent")
+        chips.grid(row=1, column=0, sticky="w", pady=4)
+        text = ctk.CTkTextbox(left, font=("Consolas", 13), wrap="none", undo=True)
+        text.grid(row=2, column=0, sticky="nsew")
+        for var in ("BASE_URL", "IP", "PORT", "USERNAME", "PASSWORD"):
+            ctk.CTkButton(chips, text="{{%s}}" % var, width=20, height=24, font=("Consolas", 11),
+                          fg_color=theme.CARD, text_color=theme.INFO, hover_color=theme.CARD_BORDER,
+                          border_width=1, border_color=theme.CARD_BORDER,
+                          command=lambda v=var: text.insert("insert", "{{%s}}" % v)).pack(side="left", padx=(0, 4))
+        ctk.CTkLabel(chips, text="  + colunas da planilha: {{SSID}}, {{VLAN}}…", text_color=theme.MUTED,
+                     font=theme.font(11)).pack(side="left")
+        status = ctk.CTkLabel(left, text="", anchor="w")
+        status.grid(row=3, column=0, sticky="ew", pady=(4, 0))
 
-        # Fields
-        ctk.CTkLabel(form_frame, text="Fabricante:").grid(row=0, column=0, padx=10, pady=10, sticky="w")
-        entry_vendor = ctk.CTkEntry(form_frame, width=250)
-        entry_vendor.grid(row=0, column=1, padx=10, pady=10)
+        def check(_=None):
+            err = validate_template(text.get("1.0", "end-1c"))
+            custom = sorted(template_variables(text.get("1.0", "end-1c")) - BUILTIN_VARS)
+            if err:
+                status.configure(text=f"✖ Erro de sintaxe: {err}", text_color=theme.ERROR)
+            else:
+                status.configure(text="✔ Sintaxe OK" + (f" · variáveis da planilha: {', '.join(custom)}" if custom else ""),
+                                 text_color=theme.SUCCESS)
+            return err
+        text.bind("<KeyRelease>", lambda e: modal.after_idle(check))
 
-        ctk.CTkLabel(form_frame, text="Modelo:").grid(row=1, column=0, padx=10, pady=10, sticky="w")
-        entry_model = ctk.CTkEntry(form_frame, width=250)
-        entry_model.grid(row=1, column=1, padx=10, pady=10)
+        # ---- coluna direita: dados + credenciais + gravação
+        right = ctk.CTkScrollableFrame(modal, fg_color="transparent")
+        right.grid(row=1, column=1, sticky="nsew", padx=(8, 20))
+        info = theme.card(right)
+        info.pack(fill="x")
+        entries = {}
+        for i, (key, lbl) in enumerate((("vendor", "Fabricante *"), ("model", "Modelo *"),
+                                        ("fw", "Versão de firmware"), ("hw", "Versão de hardware"))):
+            ctk.CTkLabel(info, text=lbl, text_color=theme.MUTED, font=theme.font(11)).grid(
+                row=i * 2, column=0, sticky="w", padx=12, pady=(8 if i == 0 else 2, 0))
+            e = ctk.CTkEntry(info)
+            e.grid(row=i * 2 + 1, column=0, sticky="ew", padx=12, pady=(0, 6))
+            entries[key] = e
+        info.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(form_frame, text="Versão Firmware:").grid(row=2, column=0, padx=10, pady=10, sticky="w")
-        entry_fw = ctk.CTkEntry(form_frame, width=250)
-        entry_fw.grid(row=2, column=1, padx=10, pady=10)
+        def_card = theme.card(right)
+        def_card.pack(fill="x", pady=(10, 0))
+        ctk.CTkLabel(def_card, text="Valores padrão (NOME=valor por linha)", font=theme.font(12, "bold")).pack(
+            anchor="w", padx=12, pady=(8, 0))
+        ctk.CTkLabel(def_card, text="Porta e protocolo de acesso deste modelo e valores fixos usados no script.\n"
+                                    "A planilha/scanner sobrescreve por equipamento.",
+                     text_color=theme.MUTED, font=theme.font(11), justify="left", wraplength=235).pack(anchor="w", padx=12)
+        defaults_box = ctk.CTkTextbox(def_card, height=80, font=("Consolas", 12))
+        defaults_box.pack(fill="x", padx=12, pady=(4, 10))
 
-        ctk.CTkLabel(form_frame, text="Versão Hardware:").grid(row=3, column=0, padx=10, pady=10, sticky="w")
-        entry_hw = ctk.CTkEntry(form_frame, width=250)
-        entry_hw.grid(row=3, column=1, padx=10, pady=10)
+        cred_card = theme.card(right)
+        cred_card.pack(fill="x", pady=10)
+        ctk.CTkLabel(cred_card, text="Credenciais (uma por linha  usuario:senha)",
+                     font=theme.font(12, "bold")).pack(anchor="w", padx=12, pady=(8, 0))
+        ctk.CTkLabel(cred_card, text="O bot tenta em ordem até o login funcionar.", text_color=theme.MUTED,
+                     font=theme.font(11)).pack(anchor="w", padx=12)
+        creds_box = ctk.CTkTextbox(cred_card, height=90, font=("Consolas", 12))
+        creds_box.pack(fill="x", padx=12, pady=(4, 10))
 
-        # Code section
-        ctk.CTkLabel(modal, text="Script de Automação (Python Playwright):").pack(anchor="w", padx=20, pady=(10, 0))
-        text_script = ctk.CTkTextbox(modal, height=120)
-        text_script.pack(fill="x", padx=20, pady=10)
-        
-        # Load existing
-        if template_id:
-            row = self.db.get_template(template_id)
-            if row:
-                entry_vendor.insert(0, row[1])
-                entry_model.insert(0, row[2])
-                entry_fw.insert(0, row[3] if row[3] else "")
-                entry_hw.insert(0, row[4] if row[4] else "")
-                text_script.insert("0.0", row[5])
+        rec = theme.card(right)
+        rec.pack(fill="x")
+        ctk.CTkLabel(rec, text="Gravar ações num roteador", font=theme.font(12, "bold")).pack(
+            anchor="w", padx=12, pady=(8, 0))
+        ctk.CTkLabel(rec, text=RECORD_HELP, justify="left", wraplength=235, anchor="w", text_color=theme.MUTED,
+                     font=theme.font(11)).pack(anchor="w", padx=12, pady=4)
+        rr = ctk.CTkFrame(rec, fg_color="transparent")
+        rr.pack(fill="x", padx=12)
+        rec_user = ctk.CTkEntry(rr, placeholder_text="usuário digitado", width=135)
+        rec_user.pack(side="left")
+        rec_pass = ctk.CTkEntry(rr, placeholder_text="senha digitada", width=135, show="•")
+        rec_pass.pack(side="left", padx=6)
+        rb = ctk.CTkFrame(rec, fg_color="transparent")
+        rb.pack(fill="x", padx=12, pady=8)
+        rec_browser = ctk.StringVar(value="Chromium")
+        ctk.CTkOptionMenu(rb, variable=rec_browser, values=["Chromium", "Firefox", "WebKit"], width=110).pack(side="left")
+        btn_rec = theme.button(rb, "Gravar", "danger", width=110, height=32)
+        btn_rec.pack(side="left", padx=8)
+
+        # ---- carregar
+        if row:
+            for k, i in (("vendor", 1), ("model", 2), ("fw", 3), ("hw", 4)):
+                entries[k].insert(0, row[i] or "")
+            text.insert("1.0", row[5])
+            creds_box.insert("1.0", row[6] or "")
+            defaults_box.insert("1.0", row[7] or "")
         else:
-            # Inject standard variable tips
-            tip = '# Variáveis injetadas durante execução: {{IP}}, {{PORT}}\n# Ex: await page.goto(f"http://{{IP}}:{{PORT}}/")\n'
-            text_script.insert("0.0", tip)
+            text.insert("1.0", NEW_TEMPLATE_TIP)
+            creds_box.insert("1.0", "admin:admin\n")
+            defaults_box.insert("1.0", "PORT=80\nSCHEME=http\n# PORTA_REMOTA=8080\n")
+        check()
 
-        # Instructions Section
-        inst_frame = ctk.CTkFrame(modal, fg_color="#2b2b2b")
-        inst_frame.pack(fill="x", padx=20, pady=5)
-        
-        inst_text = """COMO GRAVAR UMA NOVA RECEITA:
-1. Clique no botão vermelho "Gravar Ações" abaixo.
-2. Um navegador em branco e uma janela do "Playwright Inspector" irão abrir.
-3. No navegador, digite o IP do roteador que está na sua mesa e dê Enter.
-4. Faça o login normalmente e aplique as configurações devidas (ex: criar WAN, PPPOE, etc).
-5. IMPORTANTE: Não clique em lugares desnecessários para não sujar o código.
-6. Quando terminar e salvar as configs no roteador, FECHE O NAVEGADOR.
-7. O código limpo aparecerá automaticamente na caixa abaixo!
-8. DICA: O sistema tentará trocar o IP gravado por {{IP}} automaticamente para funcionar nos outros!"""
-
-        lbl_inst = ctk.CTkLabel(inst_frame, text=inst_text, justify="left", font=("Arial", 11))
-        lbl_inst.pack(padx=10, pady=10, anchor="w")
-
-        # Config Frame inside recording for browser choice
-        record_config_frame = ctk.CTkFrame(modal, fg_color="transparent")
-        record_config_frame.pack(fill="x", padx=20, pady=(0, 10))
-        
-        ctk.CTkLabel(record_config_frame, text="Navegador para Gravação:").pack(side="left", padx=(0, 10))
-        self.record_browser_var = ctk.StringVar(value="Firefox")
-        self.cb_record_browser = ctk.CTkOptionMenu(record_config_frame, variable=self.record_browser_var, values=["Firefox", "Chromium", "WebKit"], width=150)
-        self.cb_record_browser.pack(side="left", padx=(0, 20))
-        
-        ctk.CTkLabel(record_config_frame, text="Timeout (Espera):").pack(side="left", padx=(0, 10))
-        self.timeout_var = ctk.StringVar(value="15s (Rápido)")
-        self.cb_timeout = ctk.CTkOptionMenu(record_config_frame, variable=self.timeout_var, values=["15s (Rápido)", "30s (Padrão)", "60s (Lento)", "90s (Muito Lento)"], width=130)
-        self.cb_timeout.pack(side="left")
-
-        # Record Button Magic
         def launch_recorder():
-            chosen_browser = self.record_browser_var.get().lower()
-            
-            def _start_recording():
-                messagebox.showinfo("Gravador Iniciado", "Atenção:\n1. O navegador vai abrir agora.\n2. Faça a configuração no roteador.\n3. Feche o navegador para o código ser gerado aqui na tela.")
-                
-                # Runs playwright CLI to record actions
-                # Target asynchronous python target
+            browser = rec_browser.get().lower()
+
+            def record():
+                fd, tmp = tempfile.mkstemp(suffix=".py", prefix="gravacao_")
+                os.close(fd)
                 try:
-                    # Creating a temporary file to hold the generated code
-                    tmp_file = "template_rec.py"
-                    
-                    if getattr(sys, 'frozen', False):
-                        # Se estiver rodando como EXE (PyInstaller)
-                        from playwright._impl._driver import compute_driver_executable
-                        driver_executable, driver_cli = compute_driver_executable()
-                        cmd = [driver_executable, driver_cli, "codegen", "-b", chosen_browser, "--target", "python-async", "-o", tmp_file]
+                    cmd = [sys.executable, "-m", "playwright", "codegen", "-b", browser,
+                           "--target", "python-async", "-o", tmp]
+                    subprocess.run(cmd, check=False)
+                    with open(tmp, encoding="utf-8") as f:
+                        code = f.read()
+                except Exception as e:  # noqa: BLE001
+                    modal.after(0, lambda: messagebox.showerror("Gravação", f"Falha ao gravar: {e}", parent=modal))
+                    return
+                finally:
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+                script = clean_recording(code, rec_user.get().strip(), rec_pass.get())
+
+                def put():
+                    if not modal.winfo_exists():
+                        return
+                    btn_rec.configure(state="normal", text="Gravar")
+                    if not script.strip():
+                        messagebox.showwarning("Gravação", "Nenhuma ação foi gravada.", parent=modal)
+                        return
+                    if text.get("1.0", "end-1c").strip() not in ("", NEW_TEMPLATE_TIP.strip()) and not \
+                            messagebox.askyesno("Gravação", "Substituir o script atual pela gravação?\n"
+                                                "(Não = adicionar ao final)", parent=modal):
+                        text.insert("end", "\n" + script)
                     else:
-                        cmd = [sys.executable, "-m", "playwright", "codegen", "-b", chosen_browser, "--target", "python-async", "-o", tmp_file]
-                        
-                    subprocess.run(cmd, check=True)
-                    
-                    if os.path.exists(tmp_file):
-                        with open(tmp_file, "r", encoding="utf-8") as f:
-                            code = f.read()
-                        
-                        # Clean up the playwright wrapper and keep only the actions inside the main function
-                        # A bit hacky but works for the MVP
-                        lines = code.splitlines()
-                        action_lines = []
-                        inside_func = False
-                        
-                        for line in lines:
-                            if "def run(playwright: Playwright)" in line or "async def run(playwright" in line:
-                                inside_func = True
-                                continue
-                                
-                            if inside_func:
-                                # A blank line or comment might have no indent but standard codegen uses 4 spaces.
-                                # If we encounter a non-empty line that DOES NOT start with 4 spaces, the function is over.
-                                if line.strip() and not line.startswith("    "):
-                                    break
-                                    
-                                # Strip up to 4 spaces of indentation
-                                cleaned_line = line[4:] if line.startswith("    ") else line
-                                
-                                # Skip playwright launching/context boilerplate usually at start/end
-                                if any(skip in cleaned_line for skip in [
-                                    "browser = await", "context = await", "page = await", 
-                                    "await context.close()", "await browser.close()"
-                                ]):
-                                    continue
-                                    
-                                action_lines.append(cleaned_line)
-                        
-                        final_script = "\n".join(action_lines)
-                        
-                        # Sub the actual typed IP in the recording to {{IP}} template variable
-                        final_script = re.sub(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', '{{IP}}', final_script)
-                        
-                        # Update GUI safely from main thread using after()
-                        def update_text():
-                            text_script.delete("1.0", "end")
-                            if final_script.strip():
-                                text_script.insert("0.0", final_script)
-                            else:
-                                text_script.insert("0.0", "# Nenhuma ação gravada pelo Playwright. Certifique-se de realizar cliques na página antes de fechar.")
-                            
-                            try:
-                                os.remove(tmp_file)
-                            except:
-                                pass
-                        
-                        modal.after(0, update_text)
-                except Exception as e:
-                    print(f"Error recording: {e}")
-                    
-            # Check for browser and prompt download if necessary
-            app_root = self.winfo_toplevel()
-            if hasattr(app_root, 'download_browser_if_missing'):
-                # We thread the start_recording so it doesn't block the UI while Playwright runs
-                app_root.download_browser_if_missing(chosen_browser, callback=lambda: threading.Thread(target=_start_recording, daemon=True).start())
+                        text.delete("1.0", "end")
+                        text.insert("1.0", script)
+                    check()
+                modal.after(0, put)
+
+            btn_rec.configure(state="disabled", text="Gravando...")
+            app = self.winfo_toplevel()
+            start = lambda: threading.Thread(target=record, daemon=True).start()  # noqa: E731
+            if hasattr(app, "download_browser_if_missing"):
+                app.download_browser_if_missing(browser, callback=start)
             else:
-                threading.Thread(target=_start_recording, daemon=True).start()
+                start()
+        btn_rec.configure(command=launch_recorder)
 
-        btn_record = ctk.CTkButton(modal, text="🔴 Gravar Ações (Abrir Navegador)", command=launch_recorder, fg_color="#C93B3B", hover_color="#912828")
-        btn_record.pack(pady=10)
-
-        def save_template():
-            v = entry_vendor.get()
-            m = entry_model.get()
-            s = text_script.get("1.0", "end-1c").strip()
-            
-            if not v or not m or len(s) < 5:
-                messagebox.showerror("Erro", "Campos Fabricante, Modelo e Script são obrigatórios!")
+        def save():
+            v, m = entries["vendor"].get().strip(), entries["model"].get().strip()
+            script = text.get("1.0", "end-1c").strip()
+            if not v or not m or len(script) < 5:
+                messagebox.showerror("Salvar", "Fabricante, Modelo e Script são obrigatórios.", parent=modal)
                 return
-            
-            if template_id:
-                self.db.update_template(template_id, v, m, entry_fw.get(), entry_hw.get(), s)
-                messagebox.showinfo("Sucesso", "Template atualizado com sucesso!")
+            err = check()
+            if err and not messagebox.askyesno("Salvar", f"O script tem erro de sintaxe:\n{err}\n\nSalvar mesmo assim?",
+                                               parent=modal):
+                return
+            creds = creds_box.get("1.0", "end").strip()
+            uses_login = any(x in script for x in ("{{USERNAME}}", "{{PASSWORD}}"))
+            if not uses_login and re.search(r"\.fill\([^)]*(pass|senha|pwd)", script, re.I) and not messagebox.askyesno(
+                    "Salvar", "O script preenche um campo de senha com valor fixo e não usa {{PASSWORD}}.\n"
+                              "Assim a lista de credenciais não terá efeito.\n\nSalvar mesmo assim?", parent=modal):
+                return
+            fw, hw = entries["fw"].get().strip(), entries["hw"].get().strip()
+            if row:
+                self.db.update_template(row[0], v, m, fw, hw, script, creds, defaults_box.get("1.0", "end").strip())
             else:
-                self.db.save_template(v, m, entry_fw.get(), entry_hw.get(), s)
-                messagebox.showinfo("Sucesso", "Novo template cadastrado com sucesso!")
-                
-            self.refresh_table()
+                self.db.save_template(v, m, fw, hw, script, creds, defaults_box.get("1.0", "end").strip())
+            self._changed()
             modal.destroy()
 
-        btn_save = ctk.CTkButton(modal, text="Salvar Template", command=save_template)
-        btn_save.pack(pady=(10, 20))
+        bar = ctk.CTkFrame(modal, fg_color="transparent")
+        bar.grid(row=2, column=0, columnspan=2, sticky="ew", padx=20, pady=14)
+        theme.button(bar, "Salvar template", "primary", width=160, command=save).pack(side="right")
+        theme.button(bar, "Cancelar", width=100, command=modal.destroy).pack(side="right", padx=8)
+        modal.bind("<Control-s>", lambda e: save())

@@ -1,747 +1,759 @@
-import customtkinter as ctk
-from tkinter import ttk, messagebox, filedialog
-import threading
+"""Tela de Execução em Lote: 1) template  2) equipamentos  3) executar e acompanhar."""
 import asyncio
-import pandas as pd
+import ipaddress
 import json
-import socket
-from concurrent.futures import ThreadPoolExecutor
+import os
+import sys
+import threading
+import time
+import webbrowser
+from tkinter import filedialog, messagebox, ttk
 
-from core.automation_engine import AutomationEngine
+import customtkinter as ctk
+import pandas as pd
+
+from core.automation_engine import ERROR_LABELS, AutomationEngine, RetryPolicy, default_logs_dir
+from core.devices import (Device, missing_variables, parse_credentials, parse_dataframe, parse_defaults,
+                          resolve_variables, template_variables)
+from core.devices import BUILTIN_VARS
+from core.platform_utils import open_path
+from gui import theme
+from gui.views.credentials_dialog import CredentialsDialog
+from gui.views.scanner_dialog import ScannerDialog
+
+TIMEOUTS = {"15 s (rápido)": 15000, "30 s (padrão)": 30000, "60 s (lento)": 60000, "90 s (muito lento)": 90000}
+ATTEMPTS = {"1 (sem repetir)": 1, "2": 2, "3": 3, "5": 5}
+FILTERS = ["Todos", "Falhas", "Sucesso", "Pendentes"]
+
 
 class ExecutionView(ctk.CTkFrame):
+    COLS = ("n", "ip", "porta", "modelo", "status", "tent", "detalhe")
+    HEAD = ("#", "IP / Host", "Porta", "Modelo", "Status", "Tent.", "Detalhe")
+    WIDTH = (44, 130, 110, 150, 120, 50, 420)
+
     def __init__(self, master, db):
-        super().__init__(master, corner_radius=10)
+        super().__init__(master, corner_radius=10, fg_color="transparent")
         self.db = db
-        self.devices = []  # Will hold list of dicts: {'ip': '', 'port': '80', 'status': 'Pendente'}
-        self.active_engine = None
-        
-        # Grid layout
-        self.grid_rowconfigure(2, weight=1)
+        self.devices: list[Device] = []
+        self.rows: list[dict] = []          # estado de cada linha (mesmo índice de self.devices)
+        self.active_engine: AutomationEngine | None = None
+        self.running = False
+        self.run_started = 0.0
+        self.template_rows = []
+        self._build()
+        self.refresh_templates()
+
+    # ================================================================== layout
+    def _build(self):
         self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(4, weight=1)
 
-        # 1. Config Header
-        self.config_frame = ctk.CTkFrame(self)
-        self.config_frame.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="ew")
-        
-        # Configure weight for column 6 so it extends fully and doesn't cut off text
-        self.config_frame.grid_columnconfigure(6, weight=1)
-        
-        ctk.CTkLabel(self.config_frame, text="Execução em Lote", font=ctk.CTkFont(size=20, weight="bold")).grid(row=0, column=0, padx=10, pady=10, sticky="w")
-        
-        # Template selection
-        self.template_var = ctk.StringVar(value="Selecione um Template")
-        self.cb_templates = ctk.CTkOptionMenu(self.config_frame, variable=self.template_var, values=self._get_template_names(), width=220)
-        self.cb_templates.grid(row=0, column=1, padx=20)
-        
-        # Browser Selection
-        ctk.CTkLabel(self.config_frame, text="Navegador:").grid(row=0, column=2, padx=(5, 5))
+        # ---- cabeçalho com a ação principal
+        head = ctk.CTkFrame(self, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 10))
+        ctk.CTkLabel(head, text="Execução em lote", font=theme.font(22, "bold")).pack(side="left")
+        self.btn_play = theme.button(head, "Iniciar automação", "primary", width=190,
+                                     command=self.start_execution)
+        self.btn_play.pack(side="right")
+        self.btn_stop = theme.button(head, "Parar", "danger", width=120, command=self.stop_execution)
+        self.btn_test = theme.button(head, "Testar em 1 IP", width=130, command=self.open_test_modal)
+        self.btn_test.pack(side="right", padx=10)
+
+        # ---- passo 1 e 2 lado a lado
+        steps = ctk.CTkFrame(self, fg_color="transparent")
+        steps.grid(row=1, column=0, sticky="ew")
+        steps.grid_columnconfigure((0, 1), weight=1, uniform="s")
+
+        c1 = theme.card(steps)
+        c1.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        theme.section_title(c1, "1", "Template").pack(anchor="w", padx=14, pady=(12, 6))
+        row = ctk.CTkFrame(c1, fg_color="transparent")
+        row.pack(fill="x", padx=14)
+        self.template_var = ctk.StringVar(value="")
+        self.cb_templates = ctk.CTkOptionMenu(row, variable=self.template_var, values=[""], width=300,
+                                              command=lambda _=None: self._update_template_info(),
+                                              dynamic_resizing=False)
+        self.cb_templates.pack(side="left")
+        self.btn_creds = theme.button(row, "Credenciais", width=130, command=self.edit_credentials)
+        self.btn_creds.pack(side="left", padx=8)
+        self.lbl_template = ctk.CTkLabel(c1, text="", text_color=theme.MUTED, justify="left", anchor="w")
+        self.lbl_template.pack(fill="x", padx=14, pady=(6, 12))
+
+        c2 = theme.card(steps)
+        c2.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        theme.section_title(c2, "2", "Equipamentos").pack(anchor="w", padx=14, pady=(12, 6))
+        row2 = ctk.CTkFrame(c2, fg_color="transparent")
+        row2.pack(fill="x", padx=14)
+        self.btn_import = theme.button(row2, "Planilha", width=110, command=self.import_list)
+        self.btn_import.pack(side="left")
+        self.btn_range = theme.button(row2, "Faixa de IP", width=120, command=self.open_ip_range_modal)
+        self.btn_range.pack(side="left", padx=6)
+        self.btn_scan = theme.button(row2, "Scanner", width=110, command=self.open_ip_scanner_modal)
+        self.btn_scan.pack(side="left")
+        self.btn_clear = theme.button(row2, "Limpar", "ghost", width=70, command=self.clear_devices)
+        self.btn_clear.pack(side="left", padx=6)
+        self.lbl_devices = ctk.CTkLabel(c2, text="", text_color=theme.MUTED, justify="left", anchor="w")
+        self.lbl_devices.pack(fill="x", padx=14, pady=(6, 12))
+
+        # ---- avançado
+        adv = ctk.CTkFrame(self, fg_color="transparent")
+        adv.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         self.browser_var = ctk.StringVar(value="Firefox")
-        self.cb_browser = ctk.CTkOptionMenu(self.config_frame, variable=self.browser_var, values=["Firefox", "Chromium", "WebKit"], width=100)
-        self.cb_browser.grid(row=0, column=3, padx=(0, 20), sticky="w")
-        
-        # Timeout Selection 
-        ctk.CTkLabel(self.config_frame, text="Timeout (Espera):").grid(row=0, column=4, padx=(10, 5))
-        self.timeout_var = ctk.StringVar(value="15s (Rápido)")
-        self.cb_timeout = ctk.CTkOptionMenu(self.config_frame, variable=self.timeout_var, values=["15s (Rápido)", "30s (Padrão)", "60s (Lento)", "90s (Muito Lento)"], width=130)
-        self.cb_timeout.grid(row=0, column=5, padx=(0, 20), sticky="w")
+        self.timeout_var = ctk.StringVar(value="15 s (rápido)")
+        self.attempts_var = ctk.StringVar(value="3")
+        self._opt(adv, "Navegador", self.browser_var, ["Firefox", "Chromium", "WebKit"], 110)
+        self._opt(adv, "Timeout", self.timeout_var, list(TIMEOUTS), 140)
+        self._opt(adv, "Tentativas", self.attempts_var, list(ATTEMPTS), 130)
+        ctk.CTkLabel(adv, text="Simultâneos", text_color=theme.MUTED).pack(side="left", padx=(14, 6))
+        self.workers_var = ctk.IntVar(value=5)
+        self.slider_workers = ctk.CTkSlider(adv, from_=1, to=50, number_of_steps=49, variable=self.workers_var,
+                                            width=160, command=self._update_slider_label)
+        self.slider_workers.pack(side="left")
+        self.lbl_workers = ctk.CTkLabel(adv, text="", width=150, anchor="w")
+        self.lbl_workers.pack(side="left", padx=6)
+        self.var_visible = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(adv, text="Mostrar navegador", variable=self.var_visible,
+                        checkbox_width=18, checkbox_height=18).pack(side="left", padx=10)
+        self._update_slider_label(5)
 
-        # Concurrency scale (Moved to Row 1 for more space)
-        ctk.CTkLabel(self.config_frame, text="Navegadores Simultâneos:").grid(row=1, column=0, padx=(10, 5), pady=(0, 10), sticky="e")
-        self.workers_var = ctk.IntVar(value=3)
-        self.slider_workers = ctk.CTkSlider(self.config_frame, from_=1, to=100, variable=self.workers_var, number_of_steps=99, width=200, command=self._update_slider_label)
-        self.slider_workers.grid(row=1, column=1, columnspan=2, padx=5, pady=(0, 10), sticky="w")
-        self.lbl_workers = ctk.CTkLabel(self.config_frame, text="3 (~450MB RAM)", anchor="w")
-        self.lbl_workers.grid(row=1, column=3, columnspan=4, padx=5, pady=(0, 10), sticky="w")
+        # ---- progresso (aparece ao executar)
+        self.prog = ctk.CTkFrame(self, fg_color="transparent")
+        self.prog.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        self.progress = ctk.CTkProgressBar(self.prog, height=10)
+        self.progress.set(0)
+        self.progress.pack(fill="x")
+        self.lbl_progress = ctk.CTkLabel(self.prog, text="", anchor="w")
+        self.lbl_progress.pack(fill="x")
+        self.prog.grid_remove()
 
-        # 2. Action Bar
-        self.action_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.action_frame.grid(row=1, column=0, padx=20, pady=0, sticky="ew")
-        
-        self.btn_import = ctk.CTkButton(self.action_frame, text="📂 Importar Lista (CSV/Excel)", command=self.import_list)
-        self.btn_import.pack(side="left", padx=2)
-        
-        self.btn_export = ctk.CTkButton(self.action_frame, text="📜 Exportar Log", command=self.export_log, fg_color="#565b5e", hover_color="#343638", state="disabled")
-        self.btn_export.pack(side="left", padx=5)
-        
-        self.btn_range = ctk.CTkButton(self.action_frame, text="🌐 Inserir Range IP", command=self.open_ip_range_modal, fg_color="#1F6AA5", hover_color="#144870")
-        self.btn_range.pack(side="left", padx=2)
-        
-        self.btn_scan = ctk.CTkButton(self.action_frame, text="📡 Scanner de Rede", command=self.open_ip_scanner_modal, fg_color="#6c3483", hover_color="#512e5f")
-        self.btn_scan.pack(side="left", padx=2)
-        
-        self.btn_test = ctk.CTkButton(self.action_frame, text="🧪 Testar Único IP", command=self.open_test_modal, fg_color="#D1911B", hover_color="#9C6B11")
-        self.btn_test.pack(side="left", padx=(10, 2))
-        
-        self.btn_play = ctk.CTkButton(self.action_frame, text="▶️ INICIAR AUTOMAÇÃO", command=self.start_execution, fg_color="#2EA043", hover_color="#238636")
-        self.btn_play.pack(side="right", padx=2)
-        
-        self.btn_export_py = ctk.CTkButton(self.action_frame, text="🐍 Exportar Python", command=self.export_python, fg_color="#3776ab", hover_color="#2b5b84", state="disabled", width=140)
-        self.btn_export_py.pack(side="right", padx=10)
-        
-        self.btn_stop = ctk.CTkButton(self.action_frame, text="⏹️ PARAR", command=self.stop_execution, fg_color="#d12c2c", hover_color="#8f1919", width=100)
-        self.btn_stop.pack(side="right", padx=5)
-        self.btn_stop.pack_forget() # Hide initially
+        # ---- tabela
+        tcard = theme.card(self)
+        tcard.grid(row=4, column=0, sticky="nsew", pady=(10, 0))
+        tcard.grid_columnconfigure(0, weight=1)
+        tcard.grid_rowconfigure(1, weight=1)
+        bar = ctk.CTkFrame(tcard, fg_color="transparent")
+        bar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(8, 0))
+        self.filter_var = ctk.StringVar(value="Todos")
+        self.seg_filter = ctk.CTkSegmentedButton(bar, values=FILTERS, variable=self.filter_var,
+                                                 command=lambda _=None: self._render_table())
+        self.seg_filter.pack(side="left")
+        self.lbl_counts = ctk.CTkLabel(bar, text="", text_color=theme.MUTED)
+        self.lbl_counts.pack(side="left", padx=12)
+        self.btn_export_py = theme.button(bar, "Exportar Python", "ghost", width=120, command=self.export_python)
+        self.btn_export_py.pack(side="right")
+        self.btn_logs = theme.button(bar, "Abrir pasta de logs", "ghost", width=140, command=self.open_logs)
+        self.btn_logs.pack(side="right")
+        self.btn_export = theme.button(bar, "Exportar relatório", "ghost", width=130, command=self.export_log)
+        self.btn_export.pack(side="right")
+        self.btn_retry = theme.button(bar, "Reexecutar falhas", width=150, command=self.retry_failures)
 
-        # 3. Devices Table
-        self.table_frame = ctk.CTkFrame(self)
-        self.table_frame.grid(row=2, column=0, padx=20, pady=10, sticky="nsew")
-        
-        style = ttk.Style()
-        style.configure("Treeview", background="#2a2d2e", foreground="white", rowheight=25, fieldbackground="#343638", bordercolor="#343638", borderwidth=0)
-        self.tree = ttk.Treeview(self.table_frame, columns=("IP", "Porta", "Status"), show="headings")
-        self.tree.heading("IP", text="Endereço IP / Host", anchor="w")
-        self.tree.heading("Porta", text="Porta", anchor="center")
-        self.tree.heading("Status", text="Status", anchor="w")
-        
-        self.tree.column("IP", width=150, minwidth=150, stretch=False, anchor="w")
-        self.tree.column("Porta", width=100, minwidth=80, stretch=False, anchor="center")
-        self.tree.column("Status", width=400, minwidth=200, stretch=True, anchor="w")
-            
-        self.tree.pack(fill="both", expand=True, padx=10, pady=10)
+        theme.apply_tree_style()
+        self.tree = ttk.Treeview(tcard, columns=self.COLS, show="headings", selectmode="extended")
+        for c, h, w in zip(self.COLS, self.HEAD, self.WIDTH):
+            self.tree.heading(c, text=h, anchor="w")
+            self.tree.column(c, width=w, minwidth=40, anchor="w", stretch=(c == "detalhe"))
+        theme.tag_tree(self.tree)
+        sb = ttk.Scrollbar(tcard, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.grid(row=1, column=0, sticky="nsew", padx=(10, 0), pady=10)
+        sb.grid(row=1, column=1, sticky="ns", pady=10, padx=(0, 6))
+        self.tree.bind("<Double-1>", self._on_double_click)
+        self.tree.bind("<Button-3>", self._on_right_click)
+        self.tree.bind("<Delete>", lambda e: self._remove_selected())
+
+        self.empty = ctk.CTkLabel(
+            tcard, justify="center", text_color=theme.MUTED, font=theme.font(13),
+            text="Nenhum equipamento na fila.\n\nAdicione por Planilha (coluna IP + uma coluna para cada dado que muda\n"
+                 "por equipamento, ex.: SSID, SENHA_WIFI, VLAN), Faixa de IP ou Scanner\n"
+                 "(que também identifica o modelo).")
+        self._render_table()
+
+    def _opt(self, master, label, var, values, width):
+        ctk.CTkLabel(master, text=label, text_color=theme.MUTED).pack(side="left", padx=(0, 6))
+        ctk.CTkOptionMenu(master, variable=var, values=values, width=width).pack(side="left", padx=(0, 14))
+
+    def on_theme_change(self):
+        theme.apply_tree_style()
+        theme.tag_tree(self.tree)
 
     def _update_slider_label(self, val):
-        workers = int(val)
-        ram_mb = workers * 150
-        if ram_mb >= 1024:
-            ram_str = f"{ram_mb / 1024:.1f}GB"
-        else:
-            ram_str = f"{ram_mb}MB"
-            
-        if workers > 30:
-            self.lbl_workers.configure(text=f"{workers} (~{ram_str} RAM) ⚠️ ALTO", text_color="#d12c2c")
-        else:
-            self.lbl_workers.configure(text=f"{workers} (~{ram_str} RAM)", text_color=["gray10", "#DCE4EE"])
+        n = int(float(val))
+        mb = 250 + n * 60      # 1 navegador + 1 contexto por equipamento
+        txt = f"{n}  (~{mb / 1024:.1f} GB RAM)" if mb >= 1024 else f"{n}  (~{mb} MB RAM)"
+        self.lbl_workers.configure(text=txt, text_color=theme.ERROR if n > 30 else theme.TEXT)
 
+    # ================================================================== template
     def _get_template_names(self):
-        templates = self.db.get_all_templates()
-        if not templates:
-            return ["Nenhum template cadastrado"]
-        return [f"[{t[0]}] {t[1]} {t[2]}" for t in templates]
-        
+        self.template_rows = self.db.get_all_templates()
+        return [f"[{t[0]}] {t[1]} {t[2]}" + (f" ({t[3]})" if t[3] else "") for t in self.template_rows]
+
     def refresh_templates(self):
-        new_values = self._get_template_names()
-        self.cb_templates.configure(values=new_values)
-        if new_values[0] != "Nenhum template cadastrado":
-            self.cb_templates.set(new_values[-1])
+        names = self._get_template_names()
+        current = self.template_var.get()
+        if not names:
+            self.cb_templates.configure(values=["Nenhum template cadastrado"])
+            self.template_var.set("Nenhum template cadastrado")
+        else:
+            self.cb_templates.configure(values=names)
+            if current not in names:
+                self.template_var.set(names[-1] if current == "" or "Nenhum" in current else names[0])
+        self._update_template_info()
+
+    def _selected_template(self):
+        txt = self.template_var.get()
+        if not txt.startswith("["):
+            return None
+        tid = int(txt.split("]")[0][1:])
+        return self.db.get_template(tid)
+
+    def _select_template_id(self, tid):
+        for name in self.cb_templates.cget("values"):
+            if name.startswith(f"[{tid}]"):
+                self.template_var.set(name)
+                self._update_template_info()
+                return
+
+    def _update_template_info(self):
+        tpl = self._selected_template()
+        if not tpl:
+            self.lbl_template.configure(text="Cadastre um template em Gerenciador de Templates.")
+            return
+        creds = parse_credentials(tpl[6])
+        custom = sorted(template_variables(tpl[5]) - BUILTIN_VARS)
+        cred_txt = (f"Login: tenta {len(creds)} usuário(s) em ordem: " + ", ".join(c.username for c in creds[:4]) +
+                    ("…" if len(creds) > 4 else "")) if creds else "Login: admin/admin (nenhuma credencial cadastrada)"
+        var_txt = ("Precisa na planilha das colunas: " + ", ".join(custom)) if custom else \
+            "Não precisa de colunas extras na planilha"
+        d = parse_defaults(tpl[7])
+        demo = resolve_variables(Device("IP"), None, d)
+        acc_txt = f"Acesso padrão: {demo['SCHEME']}://IP:{demo['PORT']}" + (
+            "" if ("PORT" in d or "SCHEME" in d) else " (automático; ajuste em Valores padrão do template)")
+        self.lbl_template.configure(text=f"{acc_txt}\n{cred_txt}\n{var_txt}")
+        self._update_devices_info()
+
+    def edit_credentials(self):
+        tpl = self._selected_template()
+        if not tpl:
+            messagebox.showwarning("Credenciais", "Selecione um template primeiro.")
+            return
+
+        def save(text):
+            self.db.update_credentials(tpl[0], text)
+            self._update_template_info()
+        CredentialsDialog(self, f"{tpl[1]} {tpl[2]}", tpl[6], save)
+
+    # ================================================================== equipamentos
+    def _set_devices(self, devices, models=None, append=False):
+        if self.running:
+            return
+        if not append:
+            self.devices, self.rows = [], []
+        for i, d in enumerate(devices):
+            self.devices.append(d)
+            self.rows.append({"status": "pending", "label": "Pendente", "attempts": 0, "detail": "",
+                              "model": (models[i] if models else ""), "screenshot": None, "kind": None})
+        self._render_table()
+        self._update_devices_info()
+
+    def _update_devices_info(self):
+        n = len(self.devices)
+        if not n:
+            self.lbl_devices.configure(text="Nenhum equipamento na fila.")
+            return
+        cols = sorted({k for d in self.devices for k in d.variables})
+        own = sum(1 for d in self.devices if d.credential)
+        parts = [f"{n} equipamento(s) na fila"]
+        if own:
+            parts.append(f"{own} com usuário/senha próprio na planilha")
+        txt = " · ".join(parts)
+        txt += "\n" + ("Dados por equipamento (colunas da planilha): " + ", ".join(cols) if cols
+                       else "Sem dados por equipamento (só IP e porta)")
+        tpl = self._selected_template()
+        if tpl:
+            miss = missing_variables(tpl[5], self.devices, parse_defaults(tpl[7]))
+            if miss:
+                txt += "\n⚠ " + " · ".join(f"{v} equipamento(s) sem valor em {k}" for k, v in miss.items())
+        self.lbl_devices.configure(text=txt)
+
+    def clear_devices(self):
+        if self.devices and messagebox.askyesno("Limpar fila", f"Remover os {len(self.devices)} equipamentos da fila?"):
+            self._set_devices([])
 
     def import_list(self):
-        # Refresh templates on import click just in case
-        self.refresh_templates()
-        
-        filepath = filedialog.askopenfilename(
-            title="Selecione a planilha",
-            filetypes=(("CSV Files", "*.csv"), ("Excel Files", "*.xlsx"), ("All Files", "*.*"))
-        )
-        if not filepath:
+        path = filedialog.askopenfilename(title="Selecione a planilha",
+                                          filetypes=(("Planilhas", "*.xlsx *.xls *.csv"), ("Todos", "*.*")))
+        if not path:
             return
-            
         try:
-            if filepath.endswith('.csv'):
-                df = pd.read_csv(filepath)
+            if path.lower().endswith(".csv"):
+                df = pd.read_csv(path, sep=None, engine="python", dtype=str)
             else:
-                df = pd.read_excel(filepath)
-                
-            # Expected columns: IP, Porta
-            cols = df.columns.astype(str).str.lower()
-            required = ['ip', 'porta']
-            
-            # Very basic validation, mapping expected columns
-            mapped_df = pd.DataFrame()
-            for req in required:
-                match = [c for c in cols if req in c]
-                if match:
-                    mapped_df[req] = df.iloc[:, cols.tolist().index(match[0])].astype(str)
-                else:
-                    if req == 'porta':
-                        mapped_df[req] = "80"
-                    else:
-                        mapped_df[req] = ""
-
-            self.devices = []
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-                
-            for _, row in mapped_df.iterrows():
-                dev = {
-                    "ip": row.get('ip', '').strip(),
-                    "port": row.get('porta', '80').strip(),
-                    "status": "Pendente"
-                }
-                if dev['ip'] and dev['ip'] != 'nan':
-                    self.devices.append(dev)
-                    self.tree.insert("", "end", values=(dev['ip'], dev['port'], dev['status']))
-                    
-            if self.devices:
-                self.btn_export.configure(state="normal")
-                self.btn_export_py.configure(state="normal")
-                    
-        except Exception as e:
-            messagebox.showerror("Erro de Importação", f"Erro ao ler arquivo: {str(e)}\nFormato esperado: colunas IP, Porta")
-
-    def update_device_status(self, ip, message):
-        # Update device internal list
-        for dev in self.devices:
-            if dev.get('ip') == ip:
-                dev['status'] = str(message)
-                break
-                
-        # Format for single-line treeview display
-        clean_msg = str(message).replace('\n', ' | ').replace('\r', '')
-        
-        # Must be called from main thread ideally, or handled safely
-        def _update():
-            for item in self.tree.get_children():
-                if self.tree.item(item, "values")[0] == ip:
-                    vals = self.tree.item(item, "values")
-                    self.tree.item(item, values=(vals[0], vals[1], clean_msg))
-                    break
-        self.after(0, _update)
-
-    def export_log(self):
-        if not self.devices:
-            messagebox.showwarning("Aviso", "Nenhum dado para exportar.")
+                df = pd.read_excel(path, dtype=str)
+            devices, warns = parse_dataframe(df)
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror("Importar planilha", f"Não foi possível ler o arquivo:\n{e}\n\n"
+                                 "Formato: coluna IP (obrigatória), Porta, Usuário, Senha e qualquer outra "
+                                 "coluna vira variável {{NOME_DA_COLUNA}}.")
             return
-            
-        filepath = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("CSV Files", "*.csv"), ("Text Files", "*.txt"), ("Excel Files", "*.xlsx")],
-            title="Salvar Log de Execução"
-        )
-        if not filepath:
-            return
-            
-        try:
-            df = pd.DataFrame(self.devices)
-            if filepath.endswith('.csv') or filepath.endswith('.txt'):
-                df.to_csv(filepath, index=False, sep=';', encoding='utf-8')
-            elif filepath.endswith('.xlsx'):
-                df.to_excel(filepath, index=False)
-                
-            messagebox.showinfo("Sucesso", f"Log exportado com sucesso para:\n{filepath}")
-        except Exception as e:
-            messagebox.showerror("Erro", f"Falha ao exportar arquivo:\n{e}")
+        self._set_devices(devices)
+        if warns:
+            messagebox.showinfo("Importar planilha", "\n".join(warns))
 
-    def export_python(self):
-        if not self.devices:
-            messagebox.showwarning("Aviso", "Nenhum dado na fila.")
-            return
-            
-        selected_text = self.template_var.get()
-        if not selected_text or "Nenhum" in selected_text or "Selecione" in selected_text:
-            messagebox.showwarning("Aviso", "Por favor, selecione um template do dropdown primeiro.")
-            return
-            
-        template_id = int(selected_text.split("]")[0].replace("[", ""))
-        template_row = self.db.get_template(template_id)
-        
-        if not template_row:
-            messagebox.showerror("Erro", "Template não encontrado no banco.")
-            return
-            
-        script = template_row[5] # actions_script column
+    def open_ip_range_modal(self):
+        modal = ctk.CTkToplevel(self)
+        modal.title("Adicionar faixa de IPs")
+        modal.geometry("380x300")
+        modal.transient(self.winfo_toplevel())
+        modal.after(100, modal.grab_set)
+        ctk.CTkLabel(modal, text="Faixa de IPs", font=theme.font(18, "bold")).pack(pady=(18, 10))
+        form = ctk.CTkFrame(modal, fg_color="transparent")
+        form.pack(padx=20)
+        entries = {}
+        for i, (lbl, val) in enumerate((("IP inicial", "192.168.1.100"), ("IP final", "192.168.1.200"),
+                                        ("Porta", ""))):
+            ctk.CTkLabel(form, text=lbl).grid(row=i, column=0, sticky="w", pady=6, padx=(0, 10))
+            e = ctk.CTkEntry(form, width=180, placeholder_text=val or "vazio = padrão do template")
+            e.grid(row=i, column=1, pady=6)
+            entries[lbl] = e
 
-        filepath = filedialog.asksaveasfilename(
-            defaultextension=".py",
-            filetypes=[("Python Script", "*.py")],
-            title="Salvar script de automação"
-        )
-        if not filepath:
-            return
-
-        workers = int(self.workers_var.get())
-        timeout_str_val = self.timeout_var.get().split("s")[0]
-        timeout_ms = int(timeout_str_val) * 1000
-        browser_type = self.browser_var.get().lower()
-
-        devices_json = json.dumps(self.devices, indent=4)
-        script_escaped = script.replace('"""', '\\"\\"\\"')
-        
-        py_code = f'''import asyncio
-import json
-from playwright.async_api import async_playwright
-
-# Dependências necessárias para rodar este script:
-# pip install playwright
-# playwright install
-
-DEVICES = {devices_json}
-
-WORKERS = {workers}
-TIMEOUT_MS = {timeout_ms}
-BROWSER_TYPE = "{browser_type}"
-
-SCRIPT_TEMPLATE = """{script_escaped}"""
-
-async def execute_template_on_router(ip, port, username, password, semaphore):
-    async with semaphore:
-        async with async_playwright() as p:
-            browser = None
+        def gen():
+            from core.fingerprint import expand_range
             try:
-                browser_instance = getattr(p, BROWSER_TYPE.lower(), p.firefox)
-                browser = await browser_instance.launch(headless=True)
-                context = await browser.new_context(ignore_https_errors=True)
-                page = await context.new_page()
-                page.set_default_timeout(TIMEOUT_MS)
-                
-                print(f"[{{ip}}] Iniciando conexão...")
-                
-                variables = {{
-                    "{{{{IP}}}}": ip,
-                    "{{{{PORT}}}}": str(port),
-                    "{{{{USERNAME}}}}": username,
-                    "{{{{PASSWORD}}}}": password
-                }}
-                
-                template_script = SCRIPT_TEMPLATE
-                for key, val in variables.items():
-                    template_script = template_script.replace(key, str(val))
-                    
-                local_env = {{
-                    'page': page,
-                    'browser': browser,
-                    'context': context,
-                    'asyncio': asyncio,
-                    'variables': variables
-                }}
-                
-                script_lines = "\\n".join([f"    {{line}}" for line in template_script.splitlines()])
-                wrapped_script = f"async def run_automation(page):\\n{{script_lines}}"
-                
-                exec(wrapped_script, globals(), local_env)
-                await local_env['run_automation'](page)
-                
-                print(f"[{{ip}}] Sucesso")
-                return {{"ip": ip, "status": "success"}}
-            except Exception as e:
-                print(f"[{{ip}}] Erro: {{str(e)}}")
-                return {{"ip": ip, "status": "error", "message": str(e)}}
-            finally:
-                if browser:
-                    await browser.close()
+                ips = expand_range(entries["IP inicial"].get().strip(), entries["IP final"].get().strip())
+            except (ValueError, ipaddress.AddressValueError) as e:
+                messagebox.showerror("Faixa de IPs", f"Faixa inválida: {e}", parent=modal)
+                return
+            port = entries["Porta"].get().strip()
+            self._set_devices([Device(ip, port) for ip in ips], append=bool(self.devices) and messagebox.askyesno(
+                "Faixa de IPs", "Adicionar ao final da fila atual?\n(Não = substituir a fila)", parent=modal))
+            modal.destroy()
+        theme.button(modal, "Adicionar à fila", "primary", command=gen).pack(pady=18)
 
-async def run_batch():
-    tasks = []
-    semaphore = asyncio.Semaphore(WORKERS)
-            
-    for dev in DEVICES:
-        tasks.append(execute_template_on_router(
-            ip=dev['ip'],
-            port=dev['port'],
-            username=dev.get('username', 'admin'),
-            password=dev.get('password', 'admin'),
-            semaphore=semaphore
-        ))
-        
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    success = sum(1 for r in results if isinstance(r, dict) and r.get('status') == 'success')
-    print(f"\\nExecução concluída! Sucessos: {{success}} de {{len(DEVICES)}}")
+    def open_ip_scanner_modal(self):
+        def on_add(fps, template):
+            models = [" ".join(x for x in (f.vendor, f.model) if x) or "?" for f in fps]
+            devs = []
+            for f in fps:
+                v = {"FABRICANTE": f.vendor, "MODELO": f.model, "FIRMWARE": f.firmware, "MAC": f.mac,
+                     "SCHEME": f.scheme}
+                devs.append(Device(f.ip, str(f.port), variables={k: x for k, x in v.items() if x}))
+            self._set_devices(devs, models)
+            if template:
+                self._select_template_id(template[0])
+        ScannerDialog(self, self.db.get_all_templates(), on_add)
 
-if __name__ == "__main__":
-    print("Iniciando execução em lote independente...")
-    asyncio.run(run_batch())
-'''
-        try:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(py_code)
-            messagebox.showinfo("Sucesso", f"Script Python exportado com sucesso para:\n{filepath}\n\nLembre-se de instalar as dependências:\n1. pip install playwright\n2. playwright install")
-        except Exception as e:
-            messagebox.showerror("Erro", f"Falha ao exportar script:\n{e}")
+    # ================================================================== tabela
+    def _row_values(self, i):
+        d, r = self.devices[i], self.rows[i]
+        port = d.port or f"{self._effective(d)['PORT']} (padrão)"
+        return (i + 1, d.ip, port, r["model"], r["label"], r["attempts"] or "", r["detail"])
 
-    def start_execution(self):
-        chosen_browser_lower = self.browser_var.get().lower()
-        app_root = self.winfo_toplevel()
-        if hasattr(app_root, 'download_browser_if_missing'):
-            app_root.download_browser_if_missing(
-                chosen_browser_lower, 
-                callback=self._start_execution_internal
-            )
+    def _effective(self, d):
+        tpl = self._selected_template()
+        return resolve_variables(d, None, parse_defaults(tpl[7]) if tpl else {})
+
+    def _visible(self, i):
+        f, s = self.filter_var.get(), self.rows[i]["status"]
+        return (f == "Todos" or (f == "Falhas" and s == "error") or (f == "Sucesso" and s == "success")
+                or (f == "Pendentes" and s in ("pending", "running", "waiting")))
+
+    def _render_table(self):
+        self.tree.delete(*self.tree.get_children())
+        for i in range(len(self.devices)):
+            if self._visible(i):
+                self.tree.insert("", "end", iid=str(i), values=self._row_values(i), tags=(self.rows[i]["status"],))
+        if self.devices:
+            self.empty.place_forget()
         else:
-            self._start_execution_internal()
+            self.empty.place(relx=0.5, rely=0.55, anchor="center")
+        self._update_counts()
 
-    def _start_execution_internal(self):
-        """Internal method to start execution after browser check."""
+    def _update_row(self, i):
+        iid = str(i)
+        if self._visible(i):
+            if self.tree.exists(iid):
+                self.tree.item(iid, values=self._row_values(i), tags=(self.rows[i]["status"],))
+            else:
+                self._render_table()
+                return
+        elif self.tree.exists(iid):
+            self.tree.delete(iid)
+        self._update_counts()
+
+    def _counts(self):
+        c = {"success": 0, "error": 0, "cancelled": 0, "pending": 0, "running": 0, "waiting": 0}
+        for r in self.rows:
+            c[r["status"]] = c.get(r["status"], 0) + 1
+        return c
+
+    def _update_counts(self):
+        c = self._counts()
+        n = len(self.rows)
+        self.lbl_counts.configure(text=f"{n} na fila · {c['success']} sucesso · {c['error']} falha" if n else "")
+        if not self.running and c["error"]:
+            self.btn_retry.pack(side="left", padx=8)
+        else:
+            self.btn_retry.pack_forget()
+        if self.running:
+            done = c["success"] + c["error"] + c["cancelled"]
+            self.progress.set(done / max(n, 1))
+            el = time.monotonic() - self.run_started
+            eta = ""
+            if done:
+                rest = el / done * (n - done)
+                eta = f" · faltam ~{int(rest // 60)}m{int(rest % 60):02d}s"
+            self.lbl_progress.configure(
+                text=f"{done}/{n} concluídos · ✔ {c['success']} sucesso · ✖ {c['error']} falha · "
+                     f"⏳ {c['running'] + c['waiting']} em andamento · {int(el // 60)}m{int(el % 60):02d}s{eta}")
+
+    def _on_double_click(self, event):
+        iid = self.tree.identify_row(event.y)
+        if iid:
+            shot = self.rows[int(iid)].get("screenshot")
+            if shot and os.path.exists(shot):
+                open_path(shot)
+            else:
+                d = self.devices[int(iid)]
+                webbrowser.open(self._effective(d)["BASE_URL"] + "/")
+
+    def _on_right_click(self, event):
+        import tkinter as tk
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        if iid not in self.tree.selection():
+            self.tree.selection_set(iid)
+        i = int(iid)
+        d, r = self.devices[i], self.rows[i]
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Abrir no navegador",
+                         command=lambda: webbrowser.open(self._effective(d)["BASE_URL"] + "/"))
+        if r.get("screenshot") and os.path.exists(r["screenshot"]):
+            menu.add_command(label="Ver screenshot da falha", command=lambda: open_path(r["screenshot"]))
+        menu.add_command(label="Copiar IP", command=lambda: (self.clipboard_clear(), self.clipboard_append(d.ip)))
+        if d.variables:
+            menu.add_command(label="Ver variáveis", command=lambda: messagebox.showinfo(
+                d.ip, "\n".join(f"{{{{{k}}}}} = {v}" for k, v in d.variables.items())))
+        menu.add_separator()
+        menu.add_command(label="Remover da fila", command=self._remove_selected,
+                         state="disabled" if self.running else "normal")
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _remove_selected(self):
+        if self.running:
+            return
+        drop = {int(i) for i in self.tree.selection()}
+        if not drop:
+            return
+        self.devices = [d for i, d in enumerate(self.devices) if i not in drop]
+        self.rows = [r for i, r in enumerate(self.rows) if i not in drop]
+        self._render_table()
+        self._update_devices_info()
+
+    # ================================================================== execução
+    def _settings(self):
+        return dict(browser_type=self.browser_var.get().lower(), timeout_ms=TIMEOUTS[self.timeout_var.get()])
+
+    def _progress_cb(self, i, status, detail):
+        kind = {"Executando": "running", "Aguardando": "waiting", "Sucesso": "success",
+                "Cancelado": "cancelled"}.get(status, "error")
+
+        def upd():
+            r = self.rows[i]
+            r["status"], r["label"], r["detail"] = kind, ("✔ " + status if kind == "success" else status), detail
+            if kind == "running":
+                r["attempts"] = r.get("attempts", 0) + 1
+            self._update_row(i)
+        self.after(0, upd)
+
+    def start_execution(self, only=None):
+        tpl = self._selected_template()
+        if not tpl:
+            messagebox.showwarning("Iniciar", "Selecione um template.")
+            return
         if not self.devices:
-            messagebox.showwarning("Aviso", "Importe uma lista de equipamentos primeiro.")
+            messagebox.showwarning("Iniciar", "Adicione equipamentos à fila (Planilha, Faixa de IP ou Scanner).")
             return
-            
-        selected_text = self.template_var.get()
-        if not selected_text or "Nenhum" in selected_text or "Selecione" in selected_text:
-            messagebox.showwarning("Aviso", "Por favor, selecione um template do dropdown primeiro.")
+        miss = missing_variables(tpl[5], self.devices if only is None else [self.devices[i] for i in only],
+                                 parse_defaults(tpl[7]))
+        if miss and not messagebox.askyesno(
+                "Variáveis faltando",
+                "O template usa variáveis que estão vazias em alguns equipamentos:\n\n" +
+                "\n".join(f"• {{{{{k}}}}}: falta em {v} equipamento(s)" for k, v in miss.items()) +
+                "\n\nElas serão preenchidas com texto vazio. Continuar mesmo assim?"):
             return
-            
-        template_id = int(selected_text.split("]")[0].replace("[", ""))
-        template_row = self.db.get_template(template_id)
-        
-        if not template_row:
-            messagebox.showerror("Erro", "Template não encontrado no banco.")
-            return
-            
-        script = template_row[5] # actions_script column
-        workers = int(self.workers_var.get())
-        
-        # Parse timeout from selected text
-        timeout_str_val = self.timeout_var.get().split("s")[0]
-        timeout_ms = int(timeout_str_val) * 1000
-        
-        self.btn_play.pack_forget()
-        self.btn_stop.pack(side="right", padx=5)
-        self.btn_import.configure(state="disabled")
-        self.btn_export.configure(state="disabled")
-        self.btn_export_py.configure(state="disabled")
-        self.slider_workers.configure(state="disabled")
+        app = self.winfo_toplevel()
+        go = lambda: self._run(tpl, only)  # noqa: E731
+        if hasattr(app, "download_browser_if_missing"):
+            app.download_browser_if_missing(self.browser_var.get().lower(), callback=go)
+        else:
+            go()
 
-        # Asyncio loop runner
-        def run_async_loop():
-            self.active_engine = AutomationEngine(max_concurrent=workers)
-            
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
+    def retry_failures(self):
+        failed = [i for i, r in enumerate(self.rows) if r["status"] == "error"]
+        if failed:
+            self.start_execution(only=failed)
+
+    def _set_running(self, running):
+        self.running = running
+        state = "disabled" if running else "normal"
+        for b in (self.btn_import, self.btn_range, self.btn_scan, self.btn_clear, self.btn_test, self.btn_creds,
+                  self.cb_templates, self.slider_workers):
+            b.configure(state=state)
+        if running:
+            self.btn_play.pack_forget()
+            self.btn_stop.configure(state="normal", text="Parar")
+            self.btn_stop.pack(side="right")
+            self.prog.grid()
+        else:
+            self.btn_stop.pack_forget()
+            self.btn_play.pack(side="right")
+        self._update_counts()
+
+    def _run(self, tpl, only):
+        idx = list(range(len(self.devices))) if only is None else list(only)
+        for i in idx:
+            self.rows[i].update(status="pending", label="Na fila", detail="", attempts=0, screenshot=None)
+        self.filter_var.set("Todos")
+        self.run_started = time.monotonic()
+        self._set_running(True)
+        self._render_table()
+        devices = [self.devices[i] for i in idx]
+        creds = parse_credentials(tpl[6])
+        engine = AutomationEngine(max_concurrent=int(self.workers_var.get()),
+                                  retry=RetryPolicy(max_attempts=ATTEMPTS[self.attempts_var.get()]))
+        self.active_engine = engine
+        settings = self._settings()
+        visible = self.var_visible.get()
+
+        def cb(j, status, detail):
+            self._progress_cb(idx[j], status, detail)
+
+        def worker():
+            results, error = [], None
             try:
-                results = loop.run_until_complete(
-                    self.active_engine.run_batch(self.devices, script, "admin", "admin", browser_type=self.browser_var.get().lower(), timeout_ms=timeout_ms, progress_callback=self.update_device_status)
-                )
-                
-                # Execution finished
-                def _finish():
-                    self.btn_stop.pack_forget()
-                    self.btn_play.pack(side="right", padx=5)
-                    self.btn_play.configure(state="normal", text="▶️ INICIAR AUTOMAÇÃO")
-                    self.btn_import.configure(state="normal")
-                    self.btn_export.configure(state="normal")
-                    self.btn_export_py.configure(state="normal")
-                    messagebox.showinfo("Sucesso", "Todas as operações foram concluídas!")
-                    self.slider_workers.configure(state="normal")
-                    
-                    success_count = sum(1 for r in results if isinstance(r, dict) and r.get('status') == 'success')
-                    messagebox.showinfo("Finalizado", f"Execução concluída!\\nSucessos: {success_count} de {len(self.devices)}")
-                
-                self.after(0, _finish)
-                
-            except Exception as e:
-                print(f"Loop error: {e}")
-            finally:
-                loop.close()
-                self.active_engine = None
+                results = asyncio.run(engine.run_batch(devices, tpl[5], creds, progress_callback=cb,
+                                                       defaults=parse_defaults(tpl[7]),
+                                                       visible=visible, **settings))
+            except Exception as e:  # noqa: BLE001
+                error = e
+            self.after(0, lambda: self._finish(idx, results, error, engine))
+        threading.Thread(target=worker, daemon=True).start()
 
-        # Start background thread for asyncio to not freeze tkinter GUI
-        threading.Thread(target=run_async_loop, daemon=True).start()
+    def _finish(self, idx, results, error, engine):
+        for res in results:
+            i = idx[res.index]
+            r = self.rows[i]
+            r["status"] = res.status
+            r["label"] = "✔ Sucesso" if res.status == "success" else ERROR_LABELS.get(res.error_kind, "Erro")
+            r["attempts"] = res.attempts
+            r["detail"] = (f"OK em {res.duration_s:.0f}s" + (f" · usuário {res.credential}" if res.credential else "")
+                           if res.status == "success" else res.message)
+            r["screenshot"] = res.screenshot
+            r["kind"] = res.error_kind
+        self.last_run_dir = engine.run_dir
+        self.active_engine = None
+        self._set_running(False)
+        self._render_table()
+        if error:
+            messagebox.showerror("Execução", f"A execução parou com erro:\n{error}")
+            return
+        ok = sum(1 for r in results if r.status == "success")
+        fail = sum(1 for r in results if r.status == "error")
+        el = time.monotonic() - self.run_started
+        msg = f"{ok} sucesso · {fail} falha"
+        self.lbl_progress.configure(text=f"Concluído em {int(el // 60)}m{int(el % 60):02d}s · {msg}")
+        if fail:
+            by_kind = {}
+            for r in results:
+                if r.status == "error":
+                    by_kind[ERROR_LABELS.get(r.error_kind, "Erro")] = by_kind.get(ERROR_LABELS.get(r.error_kind, "Erro"), 0) + 1
+            msg += "\n\nFalhas por tipo:\n" + "\n".join(f"• {k}: {v}" for k, v in by_kind.items())
+            msg += "\n\nDê dois cliques numa falha para ver o screenshot, ou use ↻ Reexecutar falhas."
+        messagebox.showinfo("Execução concluída", msg)
 
     def stop_execution(self):
         if self.active_engine:
             self.active_engine.cancel()
             self.btn_stop.configure(state="disabled", text="Parando...")
-            messagebox.showinfo("Cancelando", "Solicitação de parada enviada. Aguarde as execuções ativas finalizarem.")
 
-    def open_ip_scanner_modal(self):
-        modal = ctk.CTkToplevel(self)
-        modal.title("Scanner de Rede (Apenas IPs Ativos)")
-        modal.geometry("500x500")
-        modal.transient(self.winfo_toplevel())
-        modal.grab_set()
-        
-        ctk.CTkLabel(modal, text="Scanner de Rede Inteligente", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=20)
-        ctk.CTkLabel(modal, text="Verifica quais IPs no Range possuem interface web ativa na porta informada.").pack(pady=(0, 20))
-        
-        form_frame = ctk.CTkFrame(modal)
-        form_frame.pack(fill="x", padx=20, pady=10)
-        
-        ctk.CTkLabel(form_frame, text="IP Inicial:").grid(row=0, column=0, padx=10, pady=10, sticky="w")
-        entry_start = ctk.CTkEntry(form_frame, width=200, placeholder_text="Ex: 192.168.1.100")
-        entry_start.grid(row=0, column=1, padx=10, pady=10)
-        
-        ctk.CTkLabel(form_frame, text="IP Final:").grid(row=1, column=0, padx=10, pady=10, sticky="w")
-        entry_end = ctk.CTkEntry(form_frame, width=200, placeholder_text="Ex: 192.168.1.254")
-        entry_end.grid(row=1, column=1, padx=10, pady=10)
-        
-        ctk.CTkLabel(form_frame, text="Porta Base:").grid(row=2, column=0, padx=10, pady=10, sticky="w")
-        entry_port = ctk.CTkEntry(form_frame, width=200)
-        entry_port.insert(0, "80")
-        entry_port.grid(row=2, column=1, padx=10, pady=10)
-
-        lbl_progress = ctk.CTkLabel(modal, text="Aguardando início...", text_color="gray")
-        lbl_progress.pack(pady=10)
-        
-        btn_action = ctk.CTkButton(modal, text="Iniciar Varredura")
-        btn_action.pack(pady=10)
-
-        def _check_port(ip, port):
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(1.5) # Fast timeout
-                try:
-                    s.connect((ip, int(port)))
-                    return True
-                except:
-                    return False
-
-        def scan_ips():
-            import ipaddress
-            start = entry_start.get().strip()
-            end = entry_end.get().strip()
-            port = entry_port.get().strip()
-            
-            try:
-                start_ip = ipaddress.IPv4Address(start)
-                end_ip = ipaddress.IPv4Address(end)
-                if int(start_ip) > int(end_ip):
-                    messagebox.showerror("Erro", "IP Inicial maior que o IP Final.")
-                    return
-                
-                # Setup UI
-                btn_action.configure(state="disabled", text="Escaneando...")
-                lbl_progress.configure(text="Disparando pacotes...")
-                
-                # Generating pool
-                ip_list = [str(ipaddress.IPv4Address(i)) for i in range(int(start_ip), int(end_ip) + 1)]
-                total = len(ip_list)
-                active_ips = []
-                
-                def _scan_thread():
-                    count = 0
-                    with ThreadPoolExecutor(max_workers=50) as executor:
-                        # Map IPs to check_port future
-                        future_to_ip = {executor.submit(_check_port, ip, port): ip for ip in ip_list}
-                        for future in future_to_ip:
-                            ip = future_to_ip[future]
-                            try:
-                                is_open = future.result()
-                                if is_open:
-                                    active_ips.append(ip)
-                            except:
-                                pass
-                            
-                            count += 1
-                            lbl_progress.configure(text=f"Progresso: {count}/{total} - Encontrados: {len(active_ips)}")
-                            self.update() # Force UI update safely
-                            
-                    # Finished scanning
-                    def _sync_finish():
-                        # Clear main list
-                        self.devices = []
-                        for item in self.tree.get_children():
-                            self.tree.delete(item)
-                            
-                        # Add alive devices
-                        for ip in active_ips:
-                            dev = {"ip": ip, "port": port, "status": "Online"}
-                            self.devices.append(dev)
-                            self.tree.insert("", "end", values=(dev['ip'], dev['port'], dev['status']))
-                            
-                        if self.devices:
-                            self.btn_export.configure(state="normal")
-                            self.btn_export_py.configure(state="normal")
-                            
-                        messagebox.showinfo("Scanner Finalizado", f"Varredura concluída. {len(active_ips)} IPs ativos encontrados.")
-                        modal.destroy()
-                        
-                    self.after(0, _sync_finish)
-                    
-                threading.Thread(target=_scan_thread, daemon=True).start()
-                
-            except Exception as e:
-                messagebox.showerror("Erro de Formato", f"IPs inválidos: {str(e)}")
-                btn_action.configure(state="normal", text="Iniciar Varredura")
-                
-        btn_action.configure(command=scan_ips)
-
-    def open_ip_range_modal(self):
-        modal = ctk.CTkToplevel(self)
-        modal.title("Adicionar Range de IPs")
-        modal.geometry("450x450")
-        modal.transient(self.winfo_toplevel())
-        modal.grab_set()
-        
-        ctk.CTkLabel(modal, text="Gerar Lista por Range", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=20)
-        
-        form_frame = ctk.CTkFrame(modal)
-        form_frame.pack(fill="x", padx=20, pady=10)
-        
-        ctk.CTkLabel(form_frame, text="IP Inicial:").grid(row=0, column=0, padx=10, pady=10, sticky="w")
-        entry_start = ctk.CTkEntry(form_frame, width=200, placeholder_text="Ex: 192.168.1.100")
-        entry_start.grid(row=0, column=1, padx=10, pady=10)
-        
-        ctk.CTkLabel(form_frame, text="IP Final:").grid(row=1, column=0, padx=10, pady=10, sticky="w")
-        entry_end = ctk.CTkEntry(form_frame, width=200, placeholder_text="Ex: 192.168.1.200")
-        entry_end.grid(row=1, column=1, padx=10, pady=10)
-        
-        ctk.CTkLabel(form_frame, text="Porta:").grid(row=2, column=0, padx=10, pady=10, sticky="w")
-        entry_port = ctk.CTkEntry(form_frame, width=200)
-        entry_port.insert(0, "80")
-        entry_port.grid(row=2, column=1, padx=10, pady=10)
-        
-        def generate_ips():
-            import ipaddress
-            start = entry_start.get().strip()
-            end = entry_end.get().strip()
-            
-            try:
-                start_ip = ipaddress.IPv4Address(start)
-                end_ip = ipaddress.IPv4Address(end)
-                
-                if int(start_ip) > int(end_ip):
-                    messagebox.showerror("Erro", "O IP Inicial não pode ser maior que o IP Final.")
-                    return
-                
-                # Clear current table
-                self.devices = []
-                for item in self.tree.get_children():
-                    self.tree.delete(item)
-                    
-                # Generate
-                current_ip = int(start_ip)
-                end_int = int(end_ip)
-                port = entry_port.get().strip()
-                
-                count = 0
-                while current_ip <= end_int:
-                    ip_str = str(ipaddress.IPv4Address(current_ip))
-                    dev = {
-                        "ip": ip_str,
-                        "port": port,
-                        "status": "Pendente"
-                    }
-                    self.devices.append(dev)
-                    self.tree.insert("", "end", values=(dev['ip'], dev['port'], dev['status']))
-                    current_ip += 1
-                    count += 1
-                    
-                if self.devices:
-                    self.btn_export.configure(state="normal")
-                    self.btn_export_py.configure(state="normal")
-                    
-                messagebox.showinfo("Sucesso", f"{count} IPs gerados e adicionados à fila de execução!")
-                modal.destroy()
-                
-            except ipaddress.AddressValueError:
-                messagebox.showerror("Erro", "Formato de IP inválido. Use formato IPv4 (ex: 192.168.0.1).")
-                
-        btn_gen = ctk.CTkButton(modal, text="Gerar Fila", command=generate_ips)
-        btn_gen.pack(pady=20)
-
+    # ================================================================== teste único
     def open_test_modal(self):
-        selected_text = self.template_var.get()
-        if not selected_text or "Nenhum" in selected_text or "Selecione" in selected_text:
-            messagebox.showwarning("Aviso", "Por favor, selecione um template válido antes de testar.")
+        tpl = self._selected_template()
+        if not tpl:
+            messagebox.showwarning("Testar", "Selecione um template.")
             return
-            
-        template_id = int(selected_text.split("]")[0].replace("[", ""))
-        template_row = self.db.get_template(template_id)
-        if not template_row:
-            return
-            
-        script = template_row[5]
-
         modal = ctk.CTkToplevel(self)
-        modal.title("Testar Template Único")
-        modal.geometry("400x500")
+        modal.title("Testar em 1 IP")
+        modal.geometry("420x420")
         modal.transient(self.winfo_toplevel())
-        modal.grab_set()
+        modal.after(100, modal.grab_set)
+        ctk.CTkLabel(modal, text="Testar template em 1 equipamento", font=theme.font(17, "bold")).pack(pady=(18, 4))
+        ctk.CTkLabel(modal, text="Abre o navegador visível para você acompanhar.", text_color=theme.MUTED).pack()
+        form = ctk.CTkFrame(modal, fg_color="transparent")
+        form.pack(pady=14)
+        sel = self.tree.selection()
+        first = self.devices[int(sel[0])] if sel else (self.devices[0] if self.devices else None)
+        fields = {}
+        for r, (lbl, val) in enumerate((("IP", first.ip if first else ""), ("Porta", first.port if first else ""),
+                                        ("Usuário", ""), ("Senha", ""))):
+            ctk.CTkLabel(form, text=lbl).grid(row=r, column=0, sticky="w", padx=(0, 10), pady=5)
+            e = ctk.CTkEntry(form, width=200, show="•" if lbl == "Senha" else "",
+                             placeholder_text={"Usuário": "(usa as credenciais do template)",
+                                               "Porta": "vazio = padrão do template"}.get(lbl, ""))
+            if val:
+                e.insert(0, val)
+            e.grid(row=r, column=1, pady=5)
+            fields[lbl] = e
+        status = ctk.CTkLabel(modal, text="", wraplength=380)
+        status.pack(pady=6)
 
-        ctk.CTkLabel(modal, text="Teste Rápido de Automação", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=20)
-
-        form_frame = ctk.CTkFrame(modal)
-        form_frame.pack(fill="x", padx=20, pady=10)
-
-        ctk.CTkLabel(form_frame, text="IP do Roteador:").grid(row=0, column=0, padx=10, pady=10, sticky="w")
-        entry_ip = ctk.CTkEntry(form_frame, width=200)
-        entry_ip.grid(row=0, column=1, padx=10, pady=10)
-
-        ctk.CTkLabel(form_frame, text="Porta Web:").grid(row=1, column=0, padx=10, pady=10, sticky="w")
-        entry_port = ctk.CTkEntry(form_frame, width=200)
-        entry_port.insert(0, "80")
-        entry_port.grid(row=1, column=1, padx=10, pady=10)
-        
-        lbl_status = ctk.CTkLabel(modal, text="Pronto para testar", text_color="yellow")
-        lbl_status.pack(pady=10)
-
-        def run_single_test():
-            ip = entry_ip.get().strip()
+        def run():
+            from core.devices import Credential
+            ip = fields["IP"].get().strip()
             if not ip:
-                messagebox.showerror("Erro", "O IP é obrigatório.")
+                status.configure(text="Informe o IP.", text_color=theme.ERROR)
                 return
-                
-            btn_exec.configure(state="disabled", text="Executando...")
-            lbl_status.configure(text="Iniciando navegador Playwright...", text_color="yellow")
-            
-            # Simple progress callback to update modal status
-            def test_progress(test_ip, msg):
-                def _upd():
-                    lbl_status.configure(text=msg)
-                modal.after(0, _upd)
-            
-            def _run_async_in_thread(engine, device, template_code, browser_type="firefox", timeout_ms=15000):
-                """ Runs the async execution engine in a separate thread's event loop """
-                ip = device["ip"]
-                port = device["port"]
-                username = device.get("username", "admin")
-                password = device.get("password", "admin")
-                
-                # We need a new event loop for this thread if one doesn't exist
-                try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    
-                # Run the async execution method
-                return loop.run_until_complete(
-                    engine.execute_template_on_router(
-                        ip=ip, 
-                        port=port, 
-                        username=username,
-                        password=password,
-                        template_script=template_code, 
-                        progress_callback=test_progress, # Use the local test_progress
-                        visible=True, # Keep visible for single test
-                        browser_type=browser_type,
-                        timeout_ms=timeout_ms
-                    )
-                )
-                    
-            def async_runner():
-                engine = AutomationEngine(max_concurrent=1)
-                device = {"ip": ip, "port": entry_port.get().strip()}
-                
-                # Get the browser type chosen in the UI
-                chosen_browser = self.browser_var.get()
-                
-                # Parse timeout from selected text
-                timeout_str_val = self.timeout_var.get().split("s")[0]
-                timeout_ms = int(timeout_str_val) * 1000
-                
-                try:
-                    result = _run_async_in_thread(engine, device, script, browser_type=chosen_browser, timeout_ms=timeout_ms)
-                    
-                    def _finish():
-                        btn_exec.configure(state="normal", text="Executar Teste")
-                        res = result
-                        if isinstance(res, dict) and res.get('status') == 'success':
-                            lbl_status.configure(text="SUCESSO! Configuração aplicada.", text_color="#2EA043")
-                            messagebox.showinfo("Sucesso", "O script rodou perfeitamente neste roteador!")
-                        else:
-                            lbl_status.configure(text="FALHA NA EXECUÇÃO", text_color="#C93B3B")
-                            err_msg = res.get('message') if isinstance(res, dict) else str(res)
-                            messagebox.showerror("Erro no Teste", f"Ocorreu um erro durante a execução:\n\n{err_msg}")
-                    
-                    modal.after(0, _finish)
-                except Exception as e:
-                    def _err():
-                        btn_exec.configure(state="normal", text="Executar Teste")
-                        lbl_status.configure(text="Erro crítico", text_color="#C93B3B")
-                        messagebox.showerror("Exceção", str(e))
-                    modal.after(0, _err)
-                    
-            # Wrap the start inside the verification logic
-            chosen_browser_lower = self.browser_var.get().lower()
-            app_root = self.winfo_toplevel()
-            if hasattr(app_root, 'download_browser_if_missing'):
-                app_root.download_browser_if_missing(
-                    chosen_browser_lower, 
-                    callback=lambda: threading.Thread(target=async_runner, daemon=True).start()
-                )
-            else:
-                threading.Thread(target=async_runner, daemon=True).start()
+            user = fields["Usuário"].get().strip()
+            cred = Credential(user, fields["Senha"].get()) if user else None
+            variables = dict(first.variables) if first and first.ip == ip else {}
+            dev = Device(ip, fields["Porta"].get().strip(), cred, variables)
+            btn.configure(state="disabled", text="Executando...")
+            status.configure(text="Abrindo navegador...", text_color=theme.INFO)
 
-        btn_exec = ctk.CTkButton(modal, text="Executar Teste", command=run_single_test, fg_color="#D1911B", hover_color="#9C6B11")
-        btn_exec.pack(pady=10)
+            def cb(_i, s, d):
+                modal.after(0, lambda: status.configure(text=f"{s} · {d}" if d else s))
+
+            def worker():
+                engine = AutomationEngine(max_concurrent=1, retry=RetryPolicy(max_attempts=1))
+                try:
+                    res = asyncio.run(engine.test_single(dev, tpl[5], parse_credentials(tpl[6]),
+                                                         defaults=parse_defaults(tpl[7]),
+                                                         progress_callback=cb, **self._settings()))
+                except Exception as e:  # noqa: BLE001
+                    res = e
+
+                def done():
+                    if not modal.winfo_exists():
+                        return
+                    btn.configure(state="normal", text="Executar teste")
+                    if getattr(res, "status", "") == "success":
+                        status.configure(text=f"✔ Funcionou! ({res.duration_s:.0f}s"
+                                              + (f", usuário {res.credential})" if res.credential else ")"),
+                                         text_color=theme.SUCCESS)
+                    else:
+                        kind = ERROR_LABELS.get(getattr(res, "error_kind", None), "Erro")
+                        status.configure(text=f"✖ {kind}: {getattr(res, 'message', res)}", text_color=theme.ERROR)
+                        shot = getattr(res, "screenshot", None)
+                        if shot and messagebox.askyesno("Teste", "Abrir o screenshot da falha?", parent=modal):
+                            open_path(shot)
+                modal.after(0, done)
+            threading.Thread(target=worker, daemon=True).start()
+
+        btn = theme.button(modal, "Executar teste", "primary", command=lambda: self.winfo_toplevel()
+                           .download_browser_if_missing(self.browser_var.get().lower(), callback=run)
+                           if hasattr(self.winfo_toplevel(), "download_browser_if_missing") else run())
+        btn.pack(pady=6)
+
+    # ================================================================== exportações
+    def export_log(self):
+        if not self.devices:
+            messagebox.showwarning("Exportar", "Nenhum dado para exportar.")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".xlsx", title="Salvar relatório",
+                                            filetypes=[("Excel", "*.xlsx"), ("CSV", "*.csv")])
+        if not path:
+            return
+        data = []
+        for d, r in zip(self.devices, self.rows):
+            data.append({"IP": d.ip, "Porta": self._effective(d)["PORT"], "Modelo": r["model"], "Status": r["label"],
+                         "Tentativas": r["attempts"], "Detalhe": r["detail"], "Screenshot": r["screenshot"] or "",
+                         **d.variables})
+        df = pd.DataFrame(data)
+        try:
+            if path.lower().endswith(".csv"):
+                df.to_csv(path, index=False, sep=";", encoding="utf-8-sig")
+            else:
+                df.to_excel(path, index=False)
+            messagebox.showinfo("Exportar", f"Relatório salvo em:\n{path}")
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror("Exportar", f"Falha ao salvar:\n{e}")
+
+    def open_logs(self):
+        path = getattr(self, "last_run_dir", None)
+        if not path or not os.path.isdir(path):
+            path = default_logs_dir()
+            os.makedirs(path, exist_ok=True)
+        open_path(path)
+
+    def export_python(self):
+        """Gera um .py autônomo com o mesmo motor do app (retry, credenciais, variáveis)."""
+        tpl = self._selected_template()
+        if not tpl or not self.devices:
+            messagebox.showwarning("Exportar Python", "Selecione um template e adicione equipamentos.")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".py", filetypes=[("Python", "*.py")],
+                                            title="Salvar script de automação")
+        if not path:
+            return
+        base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        try:
+            with open(os.path.join(base, "core", "devices.py"), encoding="utf-8") as f:
+                devices_src = f.read()
+            with open(os.path.join(base, "core", "automation_engine.py"), encoding="utf-8") as f:
+                engine_src = f.read().replace(
+                    "from core.devices import PLACEHOLDER_RE, Credential, Device, normalize_var_name", "")
+        except OSError as e:
+            messagebox.showerror("Exportar Python", f"Código do motor não encontrado:\n{e}")
+            return
+        payload = {
+            "devices": [{"ip": d.ip, "port": d.port, "variables": d.variables,
+                         "credential": [d.credential.username, d.credential.password] if d.credential else None}
+                        for d in self.devices],
+            "credentials": tpl[6] or "",
+            "defaults": parse_defaults(tpl[7]),
+            "workers": int(self.workers_var.get()),
+            "attempts": ATTEMPTS[self.attempts_var.get()],
+            **self._settings(),
+        }
+        main = f'''
+
+# ======================================================================== execução
+CONFIG = json.loads({json.dumps(json.dumps(payload, ensure_ascii=False))})
+SCRIPT_TEMPLATE = {tpl[5]!r}
+
+
+def _main():
+    devices = [Device(d["ip"], d["port"], Credential(*d["credential"]) if d["credential"] else None,
+                      d["variables"]) for d in CONFIG["devices"]]
+    engine = AutomationEngine(max_concurrent=CONFIG["workers"], retry=RetryPolicy(max_attempts=CONFIG["attempts"]))
+
+    def progress(i, status, detail):
+        print(f"[{{devices[i].ip}}:{{devices[i].port}}] {{status}} {{detail}}")
+
+    results = asyncio.run(engine.run_batch(devices, SCRIPT_TEMPLATE, parse_credentials(CONFIG["credentials"]),
+                                           browser_type=CONFIG["browser_type"], timeout_ms=CONFIG["timeout_ms"],
+                                           progress_callback=progress, defaults=CONFIG["defaults"]))
+    ok = sum(1 for r in results if r.status == "success")
+    print(f"\\nConcluído: {{ok}}/{{len(results)}} com sucesso. Screenshots de falhas em: {{engine.run_dir}}")
+
+
+if __name__ == "__main__":
+    _main()
+'''
+        header = ('# Script gerado pelo Gerador de BOT\n'
+                  f'# Template: {tpl[1]} {tpl[2]} {tpl[3] or ""}\n'
+                  '# Requisitos: pip install playwright && playwright install\n'
+                  'import json\n')
+        devices_src = devices_src.replace("from __future__ import annotations", "")
+        engine_src = engine_src.replace("from __future__ import annotations", "")
+        code = "from __future__ import annotations\n" + header + devices_src + "\n" + engine_src + main
+        code = code.replace("os.path.dirname(os.path.dirname(os.path.abspath(__file__)))",
+                            "os.path.dirname(os.path.abspath(__file__))")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(code)
+            messagebox.showinfo("Exportar Python", f"Script salvo em:\n{path}\n\nRodar com: python \"{os.path.basename(path)}\"\n"
+                                "Atenção: o arquivo contém as senhas configuradas.")
+        except OSError as e:
+            messagebox.showerror("Exportar Python", f"Falha ao salvar:\n{e}")

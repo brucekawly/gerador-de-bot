@@ -1,96 +1,163 @@
-# 🤖 Gerador de BOT - Automação Profissional de Roteadores & ONTs
+# Gerador de BOT
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python v3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
-[![Playwright](https://img.shields.io/badge/Playwright-v1.41-green.svg)](https://playwright.dev/)
+Automação em lote de ONTs e roteadores pela interface web: você **grava** a configuração uma vez num equipamento de referência e o bot **repete** em centenas de equipamentos (Wi-Fi, PPPoE, VLAN, TR-069, senhas...), com dados diferentes para cada um.
 
-O **Gerador de BOT** é uma solução avançada de automação desenvolvida em Python, projetada especificamente para o setor de telecomunicações. Esta ferramenta permite a configuração massiva e rápida de dispositivos de rede, eliminando o erro humano e reduzindo drasticamente o tempo de provisionamento em campo ou em laboratório.
+Feito em Python + [Playwright](https://playwright.dev/python/). Roda em **Windows, macOS e Linux**, com interface gráfica ou pela linha de comando.
 
----
-
-## 📸 Demonstração da Interface
-
-![Gerador de BOT Interface](screenshot.png)
-
-*Interface moderna em modo Dark, com controle de RAM, scanner de rede e monitoramento de execução em tempo real.*
+![Execução em lote](docs/img/execucao.png)
 
 ---
 
-## � Download do Executável
+## Início rápido
 
-Para usuários que desejam apenas utilizar a ferramenta sem configurar o ambiente de desenvolvimento, baixe a versão estável pronta para uso:
+Requisito: **Python 3.10+**.
 
-> [!TIP]
-> ### [🚀 Baixar Gerador de BOT v1.2.0 (.ZIP)](https://github.com/brucekawly/gerador-de-bot/releases/download/v1.2.0/GeradorDeBOT_v1.2.0.zip)
-> *Compatível com Windows 10/11. Extraia o arquivo e execute o arquivo `GeradorDeBOT.exe`.*
+| Sistema | Como abrir |
+|---|---|
+| Windows | dois cliques em `iniciar.bat` |
+| macOS / Linux | `./iniciar.sh` |
 
----
+Na primeira vez o script cria o ambiente (`.venv`), instala as dependências e os navegadores do Playwright. Depois ele só abre o app.
 
-## 🔥 Novidades na v1.2.0
+<details>
+<summary>Instalação manual / problemas comuns</summary>
 
-*   **Exportar para Python (Standalone):** Agora você pode exportar sua fila de execução inteira (com o template já configurado) diretamente para um arquivo `.py` independente. Execute-o no servidor Linux da sua provedora sem a interface gráfica!
-*   **Performance Absurda:** Limite de navegadores simultâneos expandido de 15 para incríveis **100 abas** testando equipamentos ao mesmo tempo.
-*   **Alerta Visual de RAM:** Trava de segurança visual indicando consumo perigoso de memória RAM quando ultrapassar 30 navegadores simultâneos.
-*   **Multi-Navegador Nativo:** Seleção sob demanda entre os motores Mozilla Firefox (Padrão e Resistente), Chromium e WebKit. O app só baixa o necessário!
-*   **UI Aprimorada:** Largura da janela ajustada e componentes reposicionados para evitar cortes em telas menores.
+```bash
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python -m playwright install chromium firefox
+python main.py
+```
 
----
-
-## 💎 Funcionalidades de Elite
-
-### 🎥 Gravador de Macros Inteligente (No-Code)
-*   **Aprendizado por Gravação:** Configure um equipamento manualmente e o sistema converterá suas ações em um script de automação instantaneamente.
-*   **Limpeza de Código:** O robô filtra redundâncias web, gerando scripts leves e confiáveis.
-*   **Variáveis Dinâmicas:** Substitua automaticamente dados sensíveis (IP, Porta, Usuários) por placeholders `{{IP}}`, `{{PORT}}` para uso em massa.
-
-### ⚡ Scanner de Rede Multi-Thread
-*   **Validação em Massa:** Realize varreduras rápidas em faixas de IP inteiras para identificar dispositivos online antes de iniciar a configuração.
-*   **Filtro Automático:** O sistema descarta IPs inacessíveis em segundos, otimizando a fila de trabalho.
-
-### 📊 Painel de Execução & Performance
-*   **Gerenciamento de Recursos:** Ajuste em tempo real o número de navegadores simultâneos (Navegação Paralela).
-*   **Monitoramento de Memória:** Estimativa dinâmica de uso de RAM para evitar travamentos no seu sistema operacional.
-*   **Logs Auditáveis:** Exportação completa de relatórios em formatos profissionais (XLSX/CSV).
-
-### 🧳 Solução Portátil & Autônoma
-*   **Self-Updating Motor:** Ao rodar pela primeira vez ou ao trocar de navegador, o app detecta e baixa o motor necessário (Playwright) diretamente para a pasta local apenas sob demanda.
-*   **Banco de Dados Embarcado:** Seus templates e configurações viajam com o software em um DB portátil.
+- **Linux sem interface gráfica (tkinter):** `sudo apt install python3-tk` (Debian/Ubuntu) ou `sudo dnf install python3-tkinter` (Fedora).
+- **macOS com Python do Homebrew:** `brew install python-tk`. O Python do python.org já vem com tkinter.
+- **Linux, libs do navegador:** `python -m playwright install-deps` (precisa de sudo).
+- **Servidor (sem tela):** `./install.sh --headless` instala só o motor e o Chromium.
+</details>
 
 ---
 
-## 🛠️ Guia de Instalação (Desenvolvedores)
+## Como funciona
 
-Se você deseja contribuir ou estender as funcionalidades do projeto, siga os passos abaixo:
+1. **Template**: a "receita" de um modelo. É gravada pelo botão *Gravar* (abre o navegador e registra seus cliques) ou escrita à mão.
+2. **Equipamentos**: vêm de uma planilha, de uma faixa de IPs ou do **Scanner**, que também identifica o modelo.
+3. **Executar**: o bot abre **um** navegador e roda vários equipamentos em paralelo (um contexto isolado para cada), repete o que falhou por instabilidade e tira screenshot de toda falha.
 
-1.  **Clonagem do Repositório:**
-    ```powershell
-    git clone https://github.com/brucekawly/gerador-de-bot.git
-    cd gerador-de-bot
-    ```
+### Variáveis
 
-2.  **Ambiente Virtual & Dependências:**
-    ```powershell
-    python -m venv venv
-    .\venv\Scripts\activate
-    pip install -r requirements.txt
-    ```
+No template, escreva `{{NOME}}` onde entra um valor que muda:
 
-3.  **Configuração do Motor Playwright:**
-    ```powershell
-    playwright install chromium
-    ```
+| Variável | O que é |
+|---|---|
+| `{{BASE_URL}}` | `http://IP:porta` (ou `https://`): use no `page.goto(...)` |
+| `{{IP}}`, `{{PORT}}`, `{{SCHEME}}` | partes do endereço |
+| `{{USERNAME}}`, `{{PASSWORD}}` | login que está sendo testado (veja *Credenciais*) |
+| `{{QUALQUER_COLUNA}}` | qualquer coluna da planilha: `{{SSID}}`, `{{SENHA_WIFI}}`, `{{VLAN}}`... |
 
-4.  **Execução:**
-    ```powershell
-    python main.py
-    ```
+O nome da coluna vira variável em maiúsculas e sem acento: `Senha Wi-Fi` → `{{SENHA_WIFI}}`.
+
+**Valores padrão do template** (um `NOME=valor` por linha) definem a porta e o protocolo daquele modelo e valores fixos:
+
+```
+PORT=8080
+SCHEME=https
+PORTA_REMOTA=7547
+```
+
+Prioridade: **planilha/scanner > valor padrão do template > automático** (porta 80, ou 443 se `https`).
+
+### Planilha
+
+`.xlsx` ou `.csv` (separador `,` ou `;`). Só a coluna **IP** é obrigatória.
+
+| IP | Porta | Usuário | Senha | SSID | Senha Wi-Fi |
+|---|---|---|---|---|---|
+| 10.0.0.10 | | | | Loja Centro | 12345678 |
+| 10.0.0.11 | 8080 | suporte | s3nh@ | Casa Silva | abcdefgh |
+
+- **Porta** vazia usa a porta padrão do template.
+- **Usuário/Senha** na planilha valem só para aquela linha e têm prioridade sobre as credenciais do template.
+- **Protocolo** (`http`/`https`) é opcional.
+
+### Credenciais
+
+Cada template tem uma lista `usuario:senha` (uma por linha). O bot tenta **em ordem** até o login funcionar, o que resolve frota com senhas diferentes (padrão de fábrica, senha do provedor...). Login HTTP Basic (janela do navegador) é tratado automaticamente. Para login por formulário, se o modelo não mostra erro claro, o template pode avisar o bot:
+
+```python
+if await page.locator("text=Senha incorreta").count():
+    raise LoginError("senha incorreta")
+```
+
+### Tipos de falha
+
+| Falha | Significa | O bot... |
+|---|---|---|
+| Sem resposta | IP/porta não responde | repete com espera crescente |
+| Tempo esgotado | página/elemento não apareceu | tenta a próxima credencial e depois repete |
+| Login recusado | HTTP 401 ou `LoginError` | tenta a próxima credencial |
+| Erro na página | elemento mudou, clique falhou | repete |
+| Erro no template | erro no código Python | **não** repete; corrija o template |
+
+Dê dois cliques numa falha para abrir o screenshot. Use **Reexecutar falhas** para rodar só o que falhou.
+
+### Scanner de rede
+
+Varre uma faixa de IPs e, **sem fazer login**, tenta identificar fabricante, modelo e firmware por:
+página web (título, header `Server`, realm do login), **UPnP**, **SNMP** (`sysDescr`), sondas específicas de fabricante (ex.: Fiberhome) e MAC (tabela ARP, só na mesma rede). Quando o modelo bate com um template cadastrado, ele é sugerido.
+
+> O firmware geralmente só aparece depois do login, então nem sempre é detectado.
 
 ---
 
-## � Licença
+## Linha de comando (sem interface)
 
-Este projeto está sob a licença **MIT**. Veja o arquivo [LICENSE](LICENSE) para detalhes completos sobre permissões de uso e distribuição.
+```bash
+# executar um template num lote
+python -m core run --template-id 3 --devices equipamentos.xlsx --json resultado.json
+python -m core run --template-file template.py --devices lista.csv \
+       --credentials creds.txt --set PORT=8080 --workers 10 --attempts 3
+
+# scanner
+python -m core scan 192.168.1.1 192.168.1.254 --ports 80,443,8080 --json scan.json
+
+# listar templates
+python -m core templates
+```
+
+Código de saída: `0` tudo OK · `1` algum equipamento falhou · `2` erro de uso/arquivo.
+Variáveis de ambiente: `GERADOR_BOT_DB` (banco de templates) e `GERADOR_BOT_LOGS` (pasta de screenshots).
 
 ---
-Desenvolvido com excelência por **[Bruce Kawly](https://github.com/brucekawly)**.
 
+## Estrutura
+
+```
+core/                  motor, sem interface (reutilizável por outros sistemas)
+  automation_engine.py   execução: navegador compartilhado, retry, credenciais, erros
+  devices.py             planilha, variáveis, valores padrão, credenciais
+  fingerprint.py         scanner e identificação de modelo
+  cli.py                 linha de comando (python -m core)
+  platform_utils.py      diferenças Windows/macOS/Linux
+database/db_handler.py SQLite (templates, credenciais, valores padrão)
+gui/                   interface CustomTkinter (visual OLT Cloud)
+tests/                 testes com roteador falso local
+docs/INTEGRACAO.md     guia para integrar o motor em outro sistema
+```
+
+## Testes
+
+```bash
+python -m unittest discover -s tests -t . -v
+```
+
+Os testes sobem um **roteador falso local** (login por formulário, HTTP Basic, página lenta) e servidores HTTP/SNMP falsos. Nenhum equipamento real é acessado.
+
+## Segurança
+
+- **Templates são código Python** e rodam com as permissões de quem executa. Só importe templates de fontes confiáveis (o app avisa na importação).
+- Credenciais ficam **sem criptografia** no banco local (`bot_templates.db`). O *Exportar* pergunta se deve incluí-las.
+
+## Licença
+
+MIT — veja [LICENSE](LICENSE).
