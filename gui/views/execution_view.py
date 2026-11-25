@@ -3,7 +3,6 @@ import asyncio
 import ipaddress
 import json
 import os
-import sys
 import threading
 import time
 import webbrowser
@@ -230,6 +229,18 @@ class ExecutionView(ctk.CTkFrame):
                 self.after(0, lambda e=e: messagebox.showerror("Abrir no navegador",
                                                            f"Não conectou no servidor {row[1]}:\n{e}"))
         threading.Thread(target=worker, daemon=True).start()
+
+    def create_template_from(self, d):
+        """Abre o editor de template preenchido com o equipamento da fila (IP, porta, protocolo, modelo)."""
+        tv = getattr(self.winfo_toplevel(), "views", {}).get("templates")
+        if tv is None:
+            return
+        eff = resolve_variables(d, None, {})
+        prefill = {"vendor": d.variables.get("FABRICANTE", ""), "model": d.variables.get("MODELO", ""),
+                   "firmware": d.variables.get("FIRMWARE", ""), "url": eff["BASE_URL"],
+                   "via_label": self.via_var.get(),
+                   "defaults": f"PORT={eff['PORT']}\nSCHEME={eff['SCHEME']}\n"}
+        tv.open_new_template_modal(prefill=prefill)
 
     def _get_template_names(self):
         self.template_rows = self.db.get_all_templates()
@@ -483,6 +494,8 @@ class ExecutionView(ctk.CTkFrame):
         menu = tk.Menu(self, tearoff=0)
         menu.add_command(label="Abrir no navegador" + (" (pelo servidor)" if self._via_row() else ""),
                          command=lambda: self.open_device(d))
+        menu.add_command(label="Criar template a partir deste equipamento",
+                         command=lambda: self.create_template_from(d))
         if r.get("screenshot") and os.path.exists(r["screenshot"]):
             menu.add_command(label="Ver screenshot da falha", command=lambda: open_path(r["screenshot"]))
         menu.add_command(label="Copiar IP", command=lambda: (self.clipboard_clear(), self.clipboard_append(d.ip)))

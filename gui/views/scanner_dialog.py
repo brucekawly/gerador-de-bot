@@ -98,6 +98,8 @@ class ScannerDialog(ctk.CTkToplevel):
         self.tree.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
         sb.grid(row=0, column=1, sticky="ns", pady=8, padx=(0, 4))
         self.tree.bind("<Double-1>", self._open_selected)
+        self.tree.bind("<Button-3>", self._context_menu)
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self._update_device_buttons())
         self.empty = ctk.CTkLabel(table, text="Informe as faixas ou deixe vazio para descobrir automaticamente, e clique em "
                                               "Iniciar varredura.\nDois cliques num equipamento abrem a tela dele "
                                               "no navegador.", text_color=theme.MUTED)
@@ -124,6 +126,13 @@ class ScannerDialog(ctk.CTkToplevel):
         self.btn_add_sel = theme.button(foot, "Adicionar selecionados", command=lambda: self._add(False),
                                         state="disabled")
         self.btn_add_sel.pack(side="right", padx=8)
+        # ações no equipamento selecionado
+        self.btn_template = theme.button(foot, "Criar template", width=130, state="disabled",
+                                         command=lambda: self._create_template())
+        self.btn_template.pack(side="right", padx=(0, 16))
+        self.btn_open = theme.button(foot, "Abrir no navegador", width=150, state="disabled",
+                                     command=lambda: self._open_selected())
+        self.btn_open.pack(side="right", padx=(0, 8))
 
     def _field(self, master, label, value, col, width=140):
         ctk.CTkLabel(master, text=label, text_color=theme.MUTED, font=theme.font(11)).grid(
@@ -375,6 +384,49 @@ class ScannerDialog(ctk.CTkToplevel):
         theme.button(bar, "Cancelar", width=100, command=win.destroy).pack(side="right", padx=8)
 
     # ------------------------------------------------------------------ abrir no navegador
+    def _selected_fp(self):
+        sel = self.tree.selection()
+        if len(sel) != 1:
+            return None
+        return next((f for f in self.results if f.ip == sel[0] and f.open), None)
+
+    def _update_device_buttons(self):
+        state = "normal" if self._selected_fp() else "disabled"
+        self.btn_open.configure(state=state)
+        self.btn_template.configure(state=state)
+
+    def _context_menu(self, event):
+        import tkinter as tk
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        self.tree.selection_set(iid)
+        fp = self._selected_fp()
+        if fp is None:
+            return
+        m = tk.Menu(self, tearoff=0)
+        via = " (pelo servidor)" if self.servers.get(self.via_var.get()) else ""
+        m.add_command(label="Abrir no navegador" + via, command=self._open_selected)
+        m.add_command(label="Criar template para este equipamento", command=self._create_template)
+        m.add_separator()
+        m.add_command(label="Copiar IP", command=lambda: (self.clipboard_clear(), self.clipboard_append(fp.ip)))
+        m.tk_popup(event.x_root, event.y_root)
+
+    def _create_template(self):
+        """Abre o editor de template já preenchido com o que o scanner detectou."""
+        fp = self._selected_fp()
+        if fp is None:
+            return
+        app = self.master.winfo_toplevel()
+        tv = getattr(app, "views", {}).get("templates")
+        if tv is None:
+            return
+        prefill = {"vendor": fp.vendor, "model": fp.model, "firmware": fp.firmware,
+                   "url": f"{fp.scheme}://{fp.ip}:{fp.port}", "via_label": self.via_var.get(),
+                   "defaults": f"PORT={fp.port}\nSCHEME={fp.scheme}\n"}
+        self.grab_release()
+        tv.open_new_template_modal(prefill=prefill)
+
     def _open_selected(self, event=None):
         iid = self.tree.identify_row(event.y) if event is not None else (self.tree.selection() or [None])[0]
         fp = next((f for f in self.results if f.ip == iid and f.open), None)

@@ -3,7 +3,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 import tempfile
 import threading
 from tkinter import filedialog, messagebox, ttk
@@ -57,6 +56,28 @@ def clean_recording(code: str, user: str = "", password: str = "") -> str:
         if value:
             script = re.sub(r'(["\'])' + re.escape(value) + r'\1', lambda m: f"{m.group(1)}{var}{m.group(1)}", script)
     return script
+
+
+def device_url_warning(url: str) -> str | None:
+    """Aviso quando o endereço da gravação não parece ser de um equipamento (ex.: o site do OLT Cloud)."""
+    import ipaddress
+    import urllib.parse
+    if not url:
+        return None
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    try:
+        ipaddress.ip_address(host)
+        return None                      # IP: é o caso normal
+    except ValueError:
+        pass
+    if "oltcloud" in host:
+        return (f"\"{host}\" é o endereço do OLT Cloud, não do equipamento. O gravador vai abrir a tela de login "
+                "do OLT Cloud.\n\nInforme o IP do equipamento (ex.: 192.168.1.1) ou, no Scanner, clique com o botão "
+                "direito no equipamento > Criar template.")
+    if "." in host:
+        return (f"\"{host}\" parece um site, não o IP de um equipamento. Normalmente o gravador recebe o IP do "
+                "equipamento (ex.: 192.168.1.1).")
+    return None
 
 
 class TemplatesView(ctk.CTkFrame):
@@ -234,8 +255,11 @@ class TemplatesView(ctk.CTkFrame):
         messagebox.showinfo("Importar", f"{len(items)} template(s) importado(s).")
 
     # ------------------------------------------------------------------ editor
-    def open_new_template_modal(self, template_id=None):
+    def open_new_template_modal(self, template_id=None, prefill=None):
+        """prefill (novo template a partir de um equipamento do scanner/fila):
+        {"vendor", "model", "firmware", "url", "via_label", "defaults"}"""
         row = self.db.get_template(template_id) if template_id else None
+        prefill = prefill or {}
         modal = ctk.CTkToplevel(self)
         modal.title("Editar template" if row else "Novo template")
         modal.geometry("1040x780")
@@ -339,7 +363,8 @@ class TemplatesView(ctk.CTkFrame):
         rec_url = ctk.CTkEntry(rec, placeholder_text="endereço do equipamento (ex.: http://192.168.1.1)")
         rec_url.pack(fill="x", padx=12, pady=(6, 0))
         servers = {f"Servidor: {r[1]}": r for r in self.db.get_servers()}
-        rec_via = ctk.StringVar(value="Direto (rede deste PC)")
+        rec_via = ctk.StringVar(value=prefill.get("via_label") if prefill.get("via_label") in servers
+                                else "Direto (rede deste PC)")
         via_row = ctk.CTkFrame(rec, fg_color="transparent")
         via_row.pack(fill="x", padx=12, pady=(6, 0))
         ctk.CTkLabel(via_row, text="Acessar via", text_color=theme.MUTED, font=theme.font(11)).pack(side="left")
@@ -362,7 +387,12 @@ class TemplatesView(ctk.CTkFrame):
         else:
             text.insert("1.0", NEW_TEMPLATE_TIP)
             creds_box.insert("1.0", "admin:admin\n")
-            defaults_box.insert("1.0", "PORT=80\nSCHEME=http\n# PORTA_REMOTA=8080\n")
+            defaults_box.insert("1.0", prefill.get("defaults") or "PORT=80\nSCHEME=http\n# PORTA_REMOTA=8080\n")
+            for k, key in (("vendor", "vendor"), ("model", "model"), ("fw", "firmware")):
+                if prefill.get(key):
+                    entries[k].insert(0, prefill[key])
+        if prefill.get("url"):
+            rec_url.insert(0, prefill["url"])
         check()
 
         def launch_recorder():
@@ -371,6 +401,10 @@ class TemplatesView(ctk.CTkFrame):
             start_url = rec_url.get().strip()
             if start_url and "://" not in start_url:
                 start_url = "http://" + start_url
+            warn = device_url_warning(start_url)
+            if warn and not messagebox.askyesno("Endereço do equipamento", warn + "\n\nGravar mesmo assim?",
+                                                parent=modal, icon="warning"):
+                return
 
             def record():
                 fd, tmp = tempfile.mkstemp(suffix=".py", prefix="gravacao_")
