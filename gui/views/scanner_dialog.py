@@ -8,7 +8,7 @@ import webbrowser
 
 from core import fingerprint as fpm
 from core.browser import open_url
-from core.remote import POOL, local_networks
+from core.remote import POOL, auto_selection, local_networks
 from gui import theme
 
 DIRECT_LABEL = "Direto (rede deste PC)"
@@ -62,15 +62,15 @@ class ScannerDialog(ctk.CTkToplevel):
         self.via_var = ctk.StringVar(value=self.via_label)
         ctk.CTkOptionMenu(form, variable=self.via_var, values=[DIRECT_LABEL, *self.servers], width=210,
                           dynamic_resizing=False).grid(row=1, column=0, padx=12, pady=(0, 12), sticky="w")
-        ctk.CTkLabel(form, text="Faixas (ex.: 192.168.1.0/24, 10.0.0.1-50)", text_color=theme.MUTED,
+        ctk.CTkLabel(form, text="Faixas de IP — vazio = descobrir automaticamente", text_color=theme.MUTED,
                      font=theme.font(11)).grid(row=0, column=1, padx=12, pady=(10, 0), sticky="w")
         tf = ctk.CTkFrame(form, fg_color="transparent")
         tf.grid(row=1, column=1, padx=12, pady=(0, 12), sticky="ew")
-        self.e_targets = ctk.CTkEntry(tf, width=330)
-        self.e_targets.insert(0, _guess_range() if self.via_label == DIRECT_LABEL else "")
-        self.e_targets.pack(side="left", fill="x", expand=True)
+        # botão primeiro, à direita: o campo ocupa só o espaço que sobrar (antes ele escondia o botão)
         self.btn_discover = theme.button(tf, "Descobrir redes", width=130, command=self._discover)
-        self.btn_discover.pack(side="left", padx=(8, 0))
+        self.btn_discover.pack(side="right", padx=(8, 0))
+        self.e_targets = ctk.CTkEntry(tf, width=180, placeholder_text="ex.: 192.168.1.0/24, 10.0.0.1-50")
+        self.e_targets.pack(side="left", fill="x", expand=True)
         self.e_ports = self._field(form, "Portas (em ordem)", "80, 443, 8080", 2, width=130)
         self.e_snmp = self._field(form, "Community SNMP", "public", 3, width=100)
         self.var_ident = ctk.BooleanVar(value=True)
@@ -98,7 +98,7 @@ class ScannerDialog(ctk.CTkToplevel):
         self.tree.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
         sb.grid(row=0, column=1, sticky="ns", pady=8, padx=(0, 4))
         self.tree.bind("<Double-1>", self._open_selected)
-        self.empty = ctk.CTkLabel(table, text="Informe as faixas (ou clique em Descobrir redes) e depois em "
+        self.empty = ctk.CTkLabel(table, text="Informe as faixas ou deixe vazio para descobrir automaticamente, e clique em "
                                               "Iniciar varredura.\nDois cliques num equipamento abrem a tela dele "
                                               "no navegador.", text_color=theme.MUTED)
         self.empty.place(relx=0.5, rely=0.5, anchor="center")
@@ -139,10 +139,11 @@ class ScannerDialog(ctk.CTkToplevel):
             self.stop.set()
             self.btn_scan.configure(state="disabled", text="Parando...")
             return
+        if not self.e_targets.get().strip():      # sem faixas: varredura automática
+            self._discover(auto=True)
+            return
         try:
             ips = fpm.parse_targets(self.e_targets.get())
-            if not ips:
-                raise ValueError("Informe ao menos uma faixa de IPs (ou use Descobrir redes).")
             ports = [int(p) for p in self.e_ports.get().replace(";", ",").split(",") if p.strip()]
             if not ports:
                 raise ValueError("Informe ao menos uma porta.")
@@ -279,9 +280,14 @@ class ScannerDialog(ctk.CTkToplevel):
         self.destroy()
 
     # ------------------------------------------------------------------ descoberta automática de redes
-    def _discover(self):
+    def _discover(self, auto=False):
+        """Descobre as redes. auto=True: depois de confirmar a lista, já começa a varredura."""
         row = self.servers.get(self.via_var.get())
         self.btn_discover.configure(state="disabled", text="Procurando...")
+        self.btn_scan.configure(state="disabled")
+        self.empty.configure(text=f"Descobrindo as redes {'que o servidor ' + row[1] + ' alcança' if row else 'deste PC'}..."
+                                  "\nIsso leva poucos segundos.")
+        self.empty.place(relx=0.5, rely=0.5, anchor="center")
         self.lbl.configure(text=f"Descobrindo redes {'no servidor ' + row[1] if row else 'deste PC'}...")
 
         def run():
@@ -290,14 +296,17 @@ class ScannerDialog(ctk.CTkToplevel):
                 err = None
             except Exception as e:  # noqa: BLE001
                 nets, err = [], e
-            self.after(0, lambda: self._show_networks(nets, err, row))
+            self.after(0, lambda: self._show_networks(nets, err, row, auto))
         threading.Thread(target=run, daemon=True).start()
 
-    def _show_networks(self, nets, err, row):
+    def _show_networks(self, nets, err, row, auto=False):
         if not self.winfo_exists():
             return
         self.btn_discover.configure(state="normal", text="Descobrir redes")
+        self.btn_scan.configure(state="normal")
         self.lbl.configure(text="")
+        self.empty.configure(text="Informe as faixas (ou deixe vazio para descobrir automaticamente) e clique "
+                                  "em Iniciar varredura.\nDois cliques num equipamento abrem a tela dele no navegador.")
         if err:
             messagebox.showerror("Descobrir redes", str(err), parent=self)
             return
@@ -307,19 +316,30 @@ class ScannerDialog(ctk.CTkToplevel):
             return
         win = ctk.CTkToplevel(self)
         win.title("Redes encontradas")
-        win.geometry("760x480")
+        win.geometry("780x560")
         win.transient(self)
         win.after(100, win.grab_set)
         where = f"no servidor {row[1]}" if row else "neste PC"
-        ctk.CTkLabel(win, text=f"Redes encontradas {where}", font=theme.font(17, "bold")).pack(
+        nets = auto_selection(nets)
+        n_checked = sum(1 for n in nets if n["checked"])
+        ctk.CTkLabel(win, text=f"{len(nets)} redes encontradas {where}", font=theme.font(17, "bold")).pack(
             anchor="w", padx=18, pady=(16, 2))
-        ctk.CTkLabel(win, text="Marque as que quer varrer. Redes grandes vêm desmarcadas para não varrer "
-                               "milhares de IPs sem querer.", text_color=theme.MUTED).pack(anchor="w", padx=18)
+        hint = ("Já marquei primeiro as redes com aparelhos vistos e as das interfaces, até uns 4 mil IPs. "
+                "Redes grandes ou além do limite ficam desmarcadas para a varredura não demorar demais.")
+        if n_checked < len(nets):
+            hint += f"\n{len(nets) - n_checked} rede(s) desmarcada(s): marque se quiser incluir."
+        ctk.CTkLabel(win, text=hint, text_color=theme.MUTED, justify="left", wraplength=740).pack(anchor="w", padx=18)
+        tools = ctk.CTkFrame(win, fg_color="transparent")
+        tools.pack(fill="x", padx=18, pady=(6, 0))
         box = ctk.CTkScrollableFrame(win, fg_color=theme.CARD)
         box.pack(fill="both", expand=True, padx=18, pady=10)
         checks = []
+        theme.button(tools, "Marcar todas", "ghost", width=100,
+                     command=lambda: [v.set(True) for v, _ in checks]).pack(side="left")
+        theme.button(tools, "Desmarcar todas", "ghost", width=120,
+                     command=lambda: [v.set(False) for v, _ in checks]).pack(side="left", padx=6)
         for n in nets:
-            var = ctk.BooleanVar(value=n["suggested"])
+            var = ctk.BooleanVar(value=n["checked"])
             alive = f" · {n['alive']} vistos" if n.get("alive") else ""
             ctk.CTkCheckBox(box, variable=var, text=f"{n['cidr']:<18}  {n['hosts']} IPs{alive}  —  {n['source']}",
                             font=("Consolas", 12)).pack(anchor="w", pady=3)
@@ -329,20 +349,29 @@ class ScannerDialog(ctk.CTkToplevel):
 
         def update_total(*_):
             total = sum(n["hosts"] for v, n in checks if v.get())
-            total_lbl.configure(text=f"{total} IPs selecionados" + (" — acima de 4096 a varredura fica lenta"
-                                                                     if total > 4096 else ""))
+            minutes = total / 254 * (0.5 if self.servers.get(self.via_var.get()) else 0.35)
+            est = f" · estimativa: ~{max(1, round(minutes))} min" if total else ""
+            total_lbl.configure(text=f"{total} IPs selecionados{est}"
+                                     + (" — muitas redes, a varredura vai demorar" if total > 8192 else ""),
+                                text_color=theme.WARNING if total > 8192 else theme.MUTED)
         for v, _ in checks:
             v.trace_add("write", update_total)
         update_total()
 
         def use():
             sel = [n["cidr"] for v, n in checks if v.get()]
+            if not sel:
+                messagebox.showinfo("Redes", "Marque ao menos uma rede.", parent=win)
+                return
             self.e_targets.delete(0, "end")
             self.e_targets.insert(0, ", ".join(sel))
             win.destroy()
+            if auto:
+                self.after(100, self._start)
         bar = ctk.CTkFrame(win, fg_color="transparent")
         bar.pack(fill="x", padx=18, pady=(4, 16))
-        theme.button(bar, "Usar estas redes", "primary", width=160, command=use).pack(side="right")
+        theme.button(bar, "Varrer estas redes" if auto else "Usar estas redes", "primary", width=170,
+                     command=use).pack(side="right")
         theme.button(bar, "Cancelar", width=100, command=win.destroy).pack(side="right", padx=8)
 
     # ------------------------------------------------------------------ abrir no navegador

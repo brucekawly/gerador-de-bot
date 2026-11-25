@@ -540,3 +540,26 @@ def checkup_summary(items: list[dict]) -> tuple[str, str]:
         lines.append(f"{mark} {it['item']} ({it['level']}) — falta para: {it['used_for']}."
                      + (f" Instalar: {it['fix']}" if it["fix"] else ""))
     return "\n".join(lines), worst
+
+
+def auto_selection(nets: list[dict], budget: int = 4096) -> list[dict]:
+    """Escolhe quais redes já vêm marcadas na varredura automática, sem passar de `budget` IPs.
+
+    Prioridade: redes com sinal de vida (ARP / CPEs no ACS) e redes de interface; depois as demais
+    redes pequenas, na ordem. Redes grandes (> /22) nunca entram sozinhas.
+    """
+    def score(n):
+        return (0 if n.get("alive") else 1, 0 if "interface" in n["source"] else 1)
+
+    used = 0
+    chosen = set()
+    for n in sorted((n for n in nets if n["suggested"]), key=score):
+        if used + n["hosts"] <= budget or (not chosen and n.get("alive")):
+            chosen.add(n["cidr"])
+            used += n["hosts"]
+    out = []
+    for n in nets:
+        n = dict(n)
+        n["checked"] = n["cidr"] in chosen
+        out.append(n)
+    return out

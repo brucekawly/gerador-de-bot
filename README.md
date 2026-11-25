@@ -108,7 +108,7 @@ página web (título, header `Server`, realm do login), **UPnP**, **SNMP** (`sys
 
 > O firmware geralmente só aparece depois do login, então nem sempre é detectado.
 
-Não sabe as faixas? **Descobrir redes** lista as redes que dá para varrer, de onde vieram (interface, rota, vizinhos na tabela ARP, CPEs conectadas ao ACS) e quantos IPs têm. Redes grandes vêm desmarcadas.
+Não sabe as faixas? Deixe o campo **vazio** e clique em *Iniciar varredura* (ou use **Descobrir redes**): o app lista as redes que dá para varrer, de onde vieram (interface, rota, vizinhos na tabela ARP, CPEs conectadas ao ACS) e quantos IPs têm. Já vêm marcadas primeiro as redes com aparelhos vistos, até uns 4 mil IPs; redes grandes ou além do limite ficam desmarcadas, com estimativa de tempo.
 
 ### Acesso pelo servidor do cliente
 

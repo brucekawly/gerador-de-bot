@@ -56,9 +56,49 @@ FONT = "Segoe UI"
 FONT_MONO = "Consolas"
 
 
+ICON_ICO = os.path.join(ASSETS, "app_icon.ico")
+ICON_PNG = os.path.join(ASSETS, "app_icon.png")
+_icon_photo = None
+
+
+def apply_icon(win):
+    """Ícone do app numa janela (Windows usa o .ico; macOS/Linux o .png)."""
+    global _icon_photo
+    try:
+        if os.name == "nt" and os.path.exists(ICON_ICO):
+            win.iconbitmap(ICON_ICO)
+        elif os.path.exists(ICON_PNG):
+            import tkinter as tk
+            if _icon_photo is None:
+                _icon_photo = tk.PhotoImage(file=ICON_PNG)
+            win.iconphoto(True, _icon_photo)
+    except Exception:  # noqa: BLE001 - sem ícone não impede nada
+        pass
+
+
+def _patch_toplevel_icon():
+    """O CTkToplevel troca o ícone pelo do customtkinter ~200 ms depois de abrir; reaplica o nosso depois."""
+    original = ctk.CTkToplevel.__init__
+    if getattr(original, "_gerador_icon", False):
+        return
+
+    def init(self, *a, **kw):
+        original(self, *a, **kw)
+        self.after(300, lambda: apply_icon(self))
+    init._gerador_icon = True
+    ctk.CTkToplevel.__init__ = init
+
+
 def setup():
-    """Chamar antes de criar a janela: tema claro, cores OLT Cloud e fonte Lato."""
+    """Chamar antes de criar a janela: tema claro, cores OLT Cloud, fonte Lato e ícone."""
     global FONT
+    if os.name == "nt":
+        try:   # barra de tarefas do Windows mostra o ícone do app (e não o do Python)
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("GeradorDeBOT.App")
+        except Exception:  # noqa: BLE001
+            pass
+    _patch_toplevel_icon()
     ctk.set_appearance_mode("Light")
     ctk.set_default_color_theme(THEME_FILE)
     files = [os.path.join(ASSETS, f) for f in ("LatoLatin-Regular.ttf", "LatoLatin-Bold.ttf")]

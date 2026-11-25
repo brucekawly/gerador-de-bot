@@ -54,6 +54,7 @@ class TR069ProvisionerApp(ctk.CTk):
         super().__init__()
 
         self.title("Gerador de BOT")
+        theme.apply_icon(self)
         self.geometry("1440x860")
         self.minsize(1200, 700)
         
@@ -70,7 +71,14 @@ class TR069ProvisionerApp(ctk.CTk):
         self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
         self.sidebar_frame.grid_rowconfigure(5, weight=1)
 
-        ctk.CTkLabel(self.sidebar_frame, text="Gerador de BOT", font=theme.font(19, "bold")).grid(
+        logo = None
+        try:
+            from PIL import Image
+            logo = ctk.CTkImage(Image.open(theme.ICON_PNG), size=(30, 30))
+        except Exception:  # noqa: BLE001 - sem Pillow, só o texto
+            pass
+        ctk.CTkLabel(self.sidebar_frame, text="  Gerador de BOT" if logo else "Gerador de BOT", image=logo,
+                     compound="left", font=theme.font(19, "bold")).grid(
             row=0, column=0, padx=18, pady=(22, 2), sticky="w")
         ctk.CTkLabel(self.sidebar_frame, text=f"v{APP_VERSION} · ONTs e roteadores", text_color=theme.MUTED,
                      font=theme.font(11)).grid(row=1, column=0, padx=18, pady=(0, 18), sticky="w")

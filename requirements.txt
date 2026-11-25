@@ -4,3 +4,4 @@ pandas>=2.2
 openpyxl>=3.1
 paramiko>=3.4
 keyring>=25
+pillow>=10
