@@ -152,6 +152,29 @@ class TestProbes(unittest.TestCase):
         self.assertEqual((fp.vendor, fp.model), ("Fiberhome", "HG6145F3"))
         self.assertEqual(fp.raw["note"], "Operadora: BZ_INTELBRAS")
 
+    def test_one_bad_host_does_not_kill_scan(self):
+        srv = serve({"/": (200, {}, HUAWEI_LOGIN)})
+        orig = fpm.fingerprint_host
+
+        def flaky(ip, port, **kw):
+            if port == srv.server_port:
+                raise ValueError("resposta UPnP malformada")
+            return orig(ip, port, **kw)
+        srv2 = serve({"/": (200, {}, HUAWEI_LOGIN)})
+        fpm.fingerprint_host = flaky
+        try:
+            # dois "equipamentos" no mesmo IP: usa portas diferentes em hosts diferentes simulados
+            res = []
+            for port in (srv.server_port, srv2.server_port):
+                res += fpm.scan(["127.0.0.1"], [port], snmp_community=None, include_silent=False)
+        finally:
+            fpm.fingerprint_host = orig
+            srv.shutdown()
+            srv2.shutdown()
+        self.assertEqual(len(res), 2)
+        self.assertIn("identificação falhou", res[0].raw.get("note", ""))
+        self.assertEqual(res[1].vendor, "Huawei")
+
     def test_expand_range(self):
         self.assertEqual(fpm.expand_range("10.0.0.254", "10.0.1.1"),
                          ["10.0.0.254", "10.0.0.255", "10.0.1.0", "10.0.1.1"])

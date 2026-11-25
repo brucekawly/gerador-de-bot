@@ -523,11 +523,37 @@ def expand_range(start: str, end: str, limit: int = 4096) -> list[str]:
     return [str(ipaddress.IPv4Address(i)) for i in range(a, b + 1)]
 
 
+def local_ip() -> str:
+    """IP deste computador na rede (não envia nada)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        return ""
+
+
+def _safe_fingerprint(ip, port, **kw) -> Fingerprint:
+    """Identificação que nunca derruba a varredura: erro num equipamento vira só uma nota."""
+    try:
+        return fingerprint_host(ip, port, **kw)
+    except Exception as e:  # noqa: BLE001
+        fp = Fingerprint(ip=ip, port=int(port), open=True)
+        fp.raw["note"] = f"identificação falhou: {e.__class__.__name__}"
+        return fp
+
+
 def scan(ips: list[str], ports: list[int], *, identify_models: bool = True, snmp_community: str | None = "public",
-         workers: int = 64, connect_timeout: float = 1.0,
+         workers: int = 64, connect_timeout: float = 1.0, retry_timeout: float = 3.0,
+         include_silent: bool = True,
          progress: Callable[[int, int, Fingerprint | None], None] | None = None,
          stop: threading.Event | None = None) -> list[Fingerprint]:
-    """Varre ips×portas. Para cada IP usa a primeira porta aberta (na ordem dada)."""
+    """Varre ips×portas. Para cada IP usa a primeira porta aberta (na ordem dada).
+
+    1ª passada rápida em todos os IPs; 2ª passada, com timeout maior, só nos IPs que a
+    tabela ARP mostra que existem (equipamento lento não some da lista).
+    Com include_silent, IPs que estão na rede (ARP) mas sem web nas portas voltam com open=False.
+    """
     stop = stop or threading.Event()
     progress = progress or (lambda *_: None)
     total = len(ips)
@@ -535,48 +561,82 @@ def scan(ips: list[str], ports: list[int], *, identify_models: bool = True, snmp
     ssdp_thread = None
     if identify_models:
         def _ssdp():
-            ssdp.update(ssdp_discover(3.0))
+            try:
+                ssdp.update(ssdp_discover(3.0))
+            except Exception:  # noqa: BLE001
+                pass
         ssdp_thread = threading.Thread(target=_ssdp, daemon=True)
         ssdp_thread.start()
 
-    def first_open(ip):
+    def first_open(ip, timeout):
         for p in ports:
             if stop.is_set():
                 return None
-            if check_port(ip, p, connect_timeout):
+            if check_port(ip, p, timeout):
                 return p
         return None
 
-    alive: list[tuple[str, int]] = []
+    alive: dict[str, int] = {}
     done = 0
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(first_open, ip): ip for ip in ips}
+        futs = {ex.submit(first_open, ip, connect_timeout): ip for ip in ips}
         for f in as_completed(futs):
             done += 1
-            p = f.result()
+            try:
+                p = f.result()
+            except Exception:  # noqa: BLE001
+                p = None
             if p is not None:
-                alive.append((futs[f], p))
+                alive[futs[f]] = p
             progress(done, total, None)
             if stop.is_set():
                 break
 
-    alive.sort(key=lambda x: int(ipaddress.IPv4Address(x[0])))
+    in_range = set(ips)
+    macs = {ip: mac for ip, mac in arp_table().items() if ip in in_range}
+    retry = [ip for ip in macs if ip not in alive and ip != local_ip()]
+    if retry and not stop.is_set():
+        with ThreadPoolExecutor(max_workers=min(workers, 32)) as ex:
+            futs = {ex.submit(first_open, ip, retry_timeout): ip for ip in retry}
+            for f in as_completed(futs):
+                try:
+                    p = f.result()
+                except Exception:  # noqa: BLE001
+                    p = None
+                if p is not None:
+                    alive[futs[f]] = p
+
+    def ip_key(fp):
+        return int(ipaddress.IPv4Address(fp.ip))
+
+    silent = []
+    if include_silent:
+        me = local_ip()
+        for ip, mac in macs.items():
+            if ip not in alive and ip != me:
+                fp = Fingerprint(ip=ip, port=0, open=False, mac=mac)
+                fp.raw["note"] = "na rede, sem interface web nas portas informadas"
+                silent.append(fp)
+
     if not identify_models or stop.is_set():
-        return [Fingerprint(ip, p, open=True) for ip, p in alive]
+        res = [Fingerprint(ip, p, open=True, mac=macs.get(ip, "")) for ip, p in alive.items()] + silent
+        for fp in res:
+            progress(total, total, fp)
+        return sorted(res, key=ip_key)
 
     if ssdp_thread:
         ssdp_thread.join(timeout=4)
-    macs = arp_table()
     results: list[Fingerprint] = []
     with ThreadPoolExecutor(max_workers=min(workers, 24)) as ex:
-        futs = [ex.submit(fingerprint_host, ip, p, ssdp_location=ssdp.get(ip), snmp_community=snmp_community)
-                for ip, p in alive]
-        for i, f in enumerate(as_completed(futs), 1):
+        futs = [ex.submit(_safe_fingerprint, ip, p, ssdp_location=ssdp.get(ip), snmp_community=snmp_community)
+                for ip, p in alive.items()]
+        for f in as_completed(futs):
             fp = f.result()
-            fp.mac = macs.get(fp.ip, "")
+            fp.mac = macs.get(fp.ip, "") or fp.mac
             results.append(fp)
             progress(total, total, fp)
             if stop.is_set():
                 break
-    results.sort(key=lambda x: int(ipaddress.IPv4Address(x.ip)))
-    return results
+    for fp in silent:
+        progress(total, total, fp)
+    return sorted(results + silent, key=ip_key)

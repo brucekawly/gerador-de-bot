@@ -15,9 +15,10 @@ from core.devices import (BUILTIN_VARS, Device, parse_credentials, parse_default
                           template_variables)
 from gui import theme
 
-NEW_TEMPLATE_TIP = """# Variáveis: {{BASE_URL}} (= {{SCHEME}}://{{IP}}:{{PORT}}) {{USERNAME}} {{PASSWORD}}
-# Porta/protocolo padrão deste modelo: em "Valores padrão" ao lado (ex.: PORT=8080, SCHEME=https)
-# + qualquer coluna da planilha, ex.: {{SSID}} {{SENHA_WIFI}} {{VLAN}}
+NEW_TEMPLATE_TIP = """# Endereço do equipamento: use BASE_URL entre chaves duplas (vira http://IP:porta).
+# Login: USERNAME e PASSWORD entre chaves duplas (vêm da lista de credenciais).
+# Dado diferente por equipamento? crie uma coluna na planilha (ex.: SSID) e use o nome dela
+# entre chaves duplas no script. Porta/protocolo deste modelo: em "Valores padrão" ao lado.
 # Login falhou de um jeito que o bot não percebe? use:  raise LoginError("motivo")
 await page.goto("{{BASE_URL}}/")
 """
@@ -268,12 +269,20 @@ class TemplatesView(ctk.CTkFrame):
         status.grid(row=3, column=0, sticky="ew", pady=(4, 0))
 
         def check(_=None):
-            err = validate_template(text.get("1.0", "end-1c"))
-            custom = sorted(template_variables(text.get("1.0", "end-1c")) - BUILTIN_VARS)
+            script = text.get("1.0", "end-1c")
+            err = validate_template(script)
+            try:   # valores padrão do template não precisam vir da planilha
+                fixed = set(parse_defaults(defaults_box.get("1.0", "end")))
+            except NameError:   # caixa ainda não criada
+                fixed = set()
+            custom = sorted(template_variables(script) - BUILTIN_VARS - fixed)
             if err:
-                status.configure(text=f"✖ Erro de sintaxe: {err}", text_color=theme.ERROR)
+                status.configure(text=f"✖ Erro no script: {err}", text_color=theme.ERROR)
+            elif custom:
+                status.configure(text="✔ Script válido · a planilha precisa ter as colunas: " + ", ".join(custom),
+                                 text_color=theme.SUCCESS)
             else:
-                status.configure(text="✔ Sintaxe OK" + (f" · variáveis da planilha: {', '.join(custom)}" if custom else ""),
+                status.configure(text="✔ Script válido · não precisa de colunas extras na planilha (só IP)",
                                  text_color=theme.SUCCESS)
             return err
         text.bind("<KeyRelease>", lambda e: modal.after_idle(check))
@@ -301,6 +310,7 @@ class TemplatesView(ctk.CTkFrame):
                                     "A planilha/scanner sobrescreve por equipamento.",
                      text_color=theme.MUTED, font=theme.font(11), justify="left", wraplength=235).pack(anchor="w", padx=12)
         defaults_box = ctk.CTkTextbox(def_card, height=80, font=("Consolas", 12))
+        defaults_box.bind("<KeyRelease>", lambda e: modal.after_idle(check))
         defaults_box.pack(fill="x", padx=12, pady=(4, 10))
 
         cred_card = theme.card(right)

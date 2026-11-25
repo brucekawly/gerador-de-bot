@@ -25,7 +25,7 @@ class ScannerDialog(ctk.CTkToplevel):
 
     COLS = ("ip", "porta", "fabricante", "modelo", "firmware", "mac", "fonte", "template")
     HEAD = ("IP", "Porta", "Fabricante", "Modelo", "Firmware", "MAC", "Identificado por", "Template sugerido")
-    WIDTH = (115, 55, 100, 130, 140, 135, 260, 220)
+    WIDTH = (115, 55, 100, 130, 120, 135, 310, 190)
 
     def __init__(self, master, templates, on_add):
         super().__init__(master)
@@ -80,6 +80,7 @@ class ScannerDialog(ctk.CTkToplevel):
         self.tree.tag_configure("unknown", foreground=theme.pick(theme.MUTED))
         self.tree.tag_configure("match", foreground=theme.pick(theme.SUCCESS))
         self.tree.tag_configure("vendor", foreground=theme.pick(theme.WARNING))
+        self.tree.tag_configure("silent", foreground=theme.pick(theme.BORDER_STRONG))
         sb = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
@@ -165,6 +166,14 @@ class ScannerDialog(ctk.CTkToplevel):
     def _add_row(self, fp: fpm.Fingerprint):
         if not self.winfo_exists():
             return
+        if not fp.open:   # está na rede (ARP), mas sem web nas portas informadas
+            vals = (fp.ip, "—", "—", "sem interface web", "—", fp.mac or "—",
+                    "na rede, nenhuma das portas respondeu", "—")
+            if self.tree.exists(fp.ip):
+                self.tree.item(fp.ip, values=vals, tags=("silent",))
+            else:
+                self.tree.insert("", "end", iid=fp.ip, values=vals, tags=("silent",))
+            return
         tpl, conf = fpm.match_template(fp, self.templates)
         if tpl:
             self.suggestions[fp.ip] = tpl
@@ -196,19 +205,29 @@ class ScannerDialog(ctk.CTkToplevel):
                 if self.tree.exists(fp.ip):
                     self.tree.move(fp.ip, "", i)
         self.progress.set(1)
-        known = sum(1 for f in results if f.vendor)
-        msg = f"{len(results)} equipamento(s) com interface web"
+        web = [f for f in results if f.open]
+        silent = len(results) - len(web)
+        known = sum(1 for f in web if f.vendor)
+        msg = f"{len(web)} com interface web"
         if ident:
             msg += f" · {known} identificado(s)"
+        if silent:
+            msg += f" · {silent} na rede sem web (em cinza)"
         if self.stop.is_set():
             msg += " · varredura interrompida"
         self.lbl.configure(text=msg)
         self.btn_scan.configure(state="normal", text="Iniciar varredura", fg_color=theme.ACCENT)
-        state = "normal" if results else "disabled"
+        state = "normal" if web else "disabled"
         self.btn_add_all.configure(state=state)
         self.btn_add_sel.configure(state=state)
         if not results:
-            self.empty.configure(text="Nenhum equipamento respondeu nas portas informadas.")
+            me = fpm.local_ip() or "desconhecido"
+            self.empty.configure(text=(
+                "Nenhum equipamento respondeu nas portas informadas.\n\n"
+                f"IP deste computador: {me}\n"
+                "Confira se a faixa de IPs é a mesma rede deste computador (ou se a VPN está ligada),\n"
+                "se as portas estão certas (ex.: 80, 443, 8080) e se o firewall/antivírus não está bloqueando.\n"
+                "Dica: rode de novo; equipamento ocupado às vezes demora a responder."))
             self.empty.place(relx=0.5, rely=0.5, anchor="center")
 
     def _add(self, all_rows):
@@ -216,7 +235,11 @@ class ScannerDialog(ctk.CTkToplevel):
         if not ips:
             messagebox.showinfo("Scanner", "Selecione um ou mais equipamentos na lista.", parent=self)
             return
-        chosen = [f for f in self.results if f.ip in ips]
+        chosen = [f for f in self.results if f.ip in ips and f.open]
+        if not chosen:
+            messagebox.showinfo("Scanner", "Os itens selecionados não têm interface web nas portas informadas.",
+                                parent=self)
+            return
         tpls = {self.suggestions.get(f.ip) for f in chosen}
         template = next(iter(tpls)) if len(tpls) == 1 else None
         if len({t for t in tpls if t}) > 1:

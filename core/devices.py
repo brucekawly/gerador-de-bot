@@ -128,8 +128,25 @@ def format_credentials(creds: list[Credential]) -> str:
     return "\n".join(f"{c.username}:{c.password}" for c in creds)
 
 
+def _strip_comments(script: str) -> str:
+    """Remove comentários Python (# ...) sem mexer em '#' dentro de strings."""
+    import io
+    import tokenize
+    try:
+        out_lines = (script or "").splitlines()
+        for tok in tokenize.generate_tokens(io.StringIO(script or "").readline):
+            if tok.type == tokenize.COMMENT:
+                row, col = tok.start
+                out_lines[row - 1] = out_lines[row - 1][:col]
+        return "\n".join(out_lines)
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        # template incompleto (ainda sendo digitado): ignora linhas que começam com #
+        return "\n".join(ln for ln in (script or "").splitlines() if not ln.lstrip().startswith("#"))
+
+
 def template_variables(script: str) -> set[str]:
-    return {normalize_var_name(m) for m in PLACEHOLDER_RE.findall(script or "")}
+    """Variáveis {{X}} usadas no template (comentários não contam)."""
+    return {normalize_var_name(m) for m in PLACEHOLDER_RE.findall(_strip_comments(script))}
 
 
 def parse_defaults(text: str) -> dict[str, str]:
