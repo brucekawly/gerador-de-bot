@@ -89,7 +89,11 @@ class TR069ProvisionerApp(ctk.CTk):
             self.sidebar_frame, values=["Claro", "Escuro", "Sistema"], width=180,
             command=self.change_appearance_mode_event)
         self.appearance_mode_optionemenu.set("Claro")
-        self.appearance_mode_optionemenu.grid(row=6, column=0, padx=14, pady=(2, 20))
+        self.appearance_mode_optionemenu.grid(row=6, column=0, padx=14, pady=(2, 12))
+
+        self.lbl_copyright = ctk.CTkLabel(self.sidebar_frame, text="© 2026 Bruce Kawly", font=theme.font(10),
+                                          text_color=theme.MUTED)
+        self.lbl_copyright.grid(row=7, column=0, padx=18, pady=(0, 16), sticky="w")
 
         # ---- conteúdo
         self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
