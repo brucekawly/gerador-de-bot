@@ -104,6 +104,28 @@ def check_port(ip: str, port: int, timeout: float = 1.0) -> bool:
         return False
 
 
+# Variáveis que muitas páginas de login trazem no JavaScript (TP-Link Aginet: modelName="EX141";
+# outros: productName, device_model, softwareVersion...). O valor precisa ter um dígito para não
+# pegar textos genéricos como model="Router".
+_JS_MODEL_RE = re.compile(r"""\b(?:model_?name|product_?name|device_?model|dev_?model|model_?num(?:ber)?|"""
+                          r"""board_?name|modelo)\s*[=:]\s*["']([A-Za-z0-9][\w .+/\-]{1,39})["']""", re.I)
+_JS_DESC_RE = re.compile(r"""\b(?:model_?desc|product_?desc|device_?desc)\s*[=:]\s*["']([^"'<>]{3,80})["']""", re.I)
+_JS_FW_RE = re.compile(r"""\b(?:soft(?:ware)?_?ver(?:sion)?|firmware_?ver(?:sion)?|fw_?ver(?:sion)?|"""
+                       r"""sw_?ver(?:sion)?|curr_?ver(?:sion)?)\s*[=:]\s*["']([^"'<>]{3,48})["']""", re.I)
+
+
+def extract_js_info(page: str, fp: "Fingerprint") -> None:
+    for rx, key in ((_JS_MODEL_RE, "js_model"), (_JS_FW_RE, "js_fw")):
+        for m in rx.finditer(page or ""):
+            value = m.group(1).strip()
+            if re.search(r"\d", value) and "{" not in value and "$" not in value:
+                fp.raw[key] = value
+                break
+    m = _JS_DESC_RE.search(page or "")
+    if m:
+        fp.raw["js_desc"] = m.group(1).strip()
+
+
 def _direct_dial(ip: str, port: int, timeout: float) -> socket.socket:
     return socket.create_connection((ip, port), timeout=timeout)
 
@@ -206,8 +228,9 @@ def probe_http(fp: Fingerprint, timeout: float = 2.5, dial=None) -> None:
     full = "\n".join(texts)
     no_code = re.sub(r"<script.*?</script>|<style.*?</style>|<!--.*?-->", " ", full, flags=re.S | re.I)
     fp.raw["http_visible"] = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", no_code))).strip()[:4000]
-    fp.raw["http_html"] = full[:40000]
+    fp.raw["http_html"] = full[:120000]
     fp.raw["http_path"] = path
+    extract_js_info(full, fp)          # modelName="EX141" etc. em scripts (página inteira, antes de cortar)
     run_vendor_probes(fp, tls, timeout, dial)
 
 
@@ -463,7 +486,8 @@ def identify(fp: Fingerprint) -> None:
     else:
         tiers = [
             "\n".join(x for x in (upnp_vendor, upnp_model, fp.raw.get("upnp", ""), snmp,
-                                  fp.title, fp.realm, fp.server) if x),
+                                  fp.title, fp.realm, fp.server, fp.raw.get("js_model", ""),
+                                  fp.raw.get("js_desc", "")) if x),
             visible,
             page_html,
         ]
@@ -477,13 +501,20 @@ def identify(fp: Fingerprint) -> None:
         if rule:
             vendor, _, model_pat = rule
             fp.vendor = vendor
-            for src_name, src in (("UPnP", upnp_model), ("SNMP", snmp), ("Web", fp.title),
-                                  ("Web", fp.realm), ("Web", visible), ("Web", page_html)):
+            for src_name, src in (("UPnP", upnp_model), ("Web", fp.raw.get("js_model", "")), ("SNMP", snmp),
+                                  ("Web", fp.title), ("Web", fp.realm), ("Web", visible), ("Web", page_html)):
                 m = re.search(model_pat, src or "", re.IGNORECASE)
                 if m:
                     fp.model = m.group(1).strip()
                     _add_source(fp, src_name)
                     break
+
+    # modelo declarado no script da página de login (ex.: modelName="EX141") é o mais confiável da Web
+    if fp.raw.get("js_model") and (not fp.model or fp.model.lower() in fp.raw["js_model"].lower()):
+        fp.model = fp.raw["js_model"]
+        _add_source(fp, "Web")
+    if fp.raw.get("js_desc") and not fp.raw.get("note"):
+        fp.raw["note"] = fp.raw["js_desc"]
 
     if not fp.vendor and upnp_vendor:
         fp.vendor = upnp_vendor.split(",")[0].strip()[:30]
@@ -497,6 +528,9 @@ def identify(fp: Fingerprint) -> None:
     if fw:
         fp.firmware = fw
         _add_source(fp, "UPnP")
+    elif fp.raw.get("js_fw"):
+        fp.firmware = fp.raw["js_fw"]
+        _add_source(fp, "Web")
     else:
         for rx in (FIRMWARE_RE, *FIRMWARE_EXTRA_RES):
             hit = next(((n, m) for n, src in (("SNMP", snmp), ("Web", visible), ("Web", page_html))

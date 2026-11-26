@@ -83,6 +83,24 @@ class TestIdentify(unittest.TestCase):
         self.assertEqual(tp.vendor, "TP-Link")
         self.assertIn("tplinkwifi.net", tp.raw["note"])
 
+    def test_model_from_script_in_big_page(self):
+        page = ("<html><head><link href='http://www.tp-link.com'></head><body>" + "x" * 60000 +
+                '<script>var modelName="EX141"; var modelDesc="AX1500 Dual Band Wi-Fi 6 Router";'
+                ' var model = "";</script></body></html>')
+        srv = serve({"/": (200, {"Content-Type": "text/html"}, page)})
+        try:
+            fp = fpm.fingerprint_host("127.0.0.1", srv.server_port, snmp_community=None, use_upnp=False)
+        finally:
+            srv.shutdown()
+        self.assertEqual((fp.vendor, fp.model), ("TP-Link", "EX141"))
+        self.assertEqual(fp.raw.get("note"), "AX1500 Dual Band Wi-Fi 6 Router")
+
+    def test_js_generic_values_ignored(self):
+        fp = Fingerprint("x", 80)
+        fpm.extract_js_info('var model="Router"; productName = "HG8145V5"; softwareVersion="V5R020C10S115"', fp)
+        self.assertEqual(fp.raw.get("js_model"), "HG8145V5")
+        self.assertEqual(fp.raw.get("js_fw"), "V5R020C10S115")
+
     def test_redirect_to_other_host_is_recorded(self):
         srv = serve({"/": (302, {"Location": "https://cliente.oltcloud.co/"}, "")})
         try:
