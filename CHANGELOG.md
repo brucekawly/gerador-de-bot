@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.0.1 — 2026-11-26
+
+### Scanner e criação de templates
+- **Criar template direto do scanner:** selecione um equipamento e use **Criar template** (ou o botão direito). O editor abre preenchido com fabricante, modelo, firmware, porta, protocolo, endereço do equipamento e o mesmo servidor. O mesmo vale pelo botão direito da fila de execução.
+- **Abrir no navegador** também como botão no rodapé do scanner.
+- **Servidores e sistemas não são confundidos com equipamentos:** o scanner registra para onde a página redireciona. O OLT Cloud e servidores web comuns (página padrão do nginx/Apache, servidor Ubuntu/Debian) aparecem em cinza como "não é equipamento", ficam fora do "Adicionar todos" e avisam antes de criar template. Redirecionamento para domínio de fabricante (ex.: `tplinkwifi.net`) continua contando como equipamento.
+- **Modelo e firmware lidos dos scripts da página de login** (`modelName`, `productName`, `softwareVersion`…), na página inteira. Ex.: TP-Link EX141 (Aginet).
+
+### Gravador
+- Avisa quando o endereço informado é do OLT Cloud (ou outro site) e não o IP do equipamento.
+
 ## v2.0.0 — 2026-11-25
 
 Versão reescrita: motor mais rápido e confiável, scanner que identifica o modelo, acesso aos equipamentos pela rede do cliente e visual novo.

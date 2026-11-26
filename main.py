@@ -13,7 +13,7 @@ from gui.views.templates_view import TemplatesView
 from gui.views.execution_view import ExecutionView
 from gui.views.servers_view import ServersView
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 
 theme.setup()   # tema claro + cores e fonte do OLT Cloud
 
