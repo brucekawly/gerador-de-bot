@@ -208,6 +208,13 @@ class ScannerDialog(ctk.CTkToplevel):
             else:
                 self.tree.insert("", "end", iid=fp.ip, values=vals, tags=("silent",))
             return
+        if fpm.is_system(fp):    # servidor/sistema web (ex.: o próprio OLT Cloud): não é equipamento
+            vals = (fp.ip, fp.port, fp.vendor, fp.model, "—", fp.mac or "—", fp.raw.get("note", ""), "—")
+            if self.tree.exists(fp.ip):
+                self.tree.item(fp.ip, values=vals, tags=("silent",))
+            else:
+                self.tree.insert("", "end", iid=fp.ip, values=vals, tags=("silent",))
+            return
         tpl, conf = fpm.match_template(fp, self.templates)
         if tpl:
             self.suggestions[fp.ip] = tpl
@@ -239,12 +246,16 @@ class ScannerDialog(ctk.CTkToplevel):
                 if self.tree.exists(fp.ip):
                     self.tree.move(fp.ip, "", i)
         self.progress.set(1)
-        web = [f for f in results if f.open]
+        web = [f for f in results if f.open and not fpm.is_system(f)]
+        n_sys = sum(1 for f in results if f.open and fpm.is_system(f))
         silent = len(results) - len(web)
         known = sum(1 for f in web if f.vendor)
         msg = f"{len(web)} com interface web"
         if ident:
             msg += f" · {known} identificado(s)"
+        silent -= n_sys
+        if n_sys:
+            msg += f" · {n_sys} servidor(es)/sistema(s), não são equipamentos (em cinza)"
         if silent:
             msg += f" · {silent} na rede sem web (em cinza)"
         if self.stop.is_set():
@@ -270,6 +281,15 @@ class ScannerDialog(ctk.CTkToplevel):
             messagebox.showinfo("Scanner", "Selecione um ou mais equipamentos na lista.", parent=self)
             return
         chosen = [f for f in self.results if f.ip in ips and f.open]
+        systems = [f for f in chosen if fpm.is_system(f)]
+        if systems:
+            if all_rows:
+                chosen = [f for f in chosen if not fpm.is_system(f)]
+            elif not messagebox.askyesno(
+                    "Scanner", "Entre os selecionados há servidor/sistema (não é equipamento):\n"
+                    + "\n".join(f"• {f.ip} — {f.raw.get('note', '')}" for f in systems)
+                    + "\n\nAdicionar mesmo assim?", parent=self):
+                chosen = [f for f in chosen if not fpm.is_system(f)]
         if not chosen:
             messagebox.showinfo("Scanner", "Os itens selecionados não têm interface web nas portas informadas.",
                                 parent=self)
@@ -416,6 +436,10 @@ class ScannerDialog(ctk.CTkToplevel):
         """Abre o editor de template já preenchido com o que o scanner detectou."""
         fp = self._selected_fp()
         if fp is None:
+            return
+        if fpm.is_system(fp) and not messagebox.askyesno(
+                "Criar template", f"{fp.ip} não é um equipamento: {fp.raw.get('note', '')}.\n\n"
+                "Escolha um roteador/ONT da lista. Criar o template mesmo assim?", parent=self, icon="warning"):
             return
         app = self.master.winfo_toplevel()
         tv = getattr(app, "views", {}).get("templates")

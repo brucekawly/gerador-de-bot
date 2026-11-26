@@ -195,6 +195,7 @@ def probe_http(fp: Fingerprint, timeout: float = 2.5, dial=None) -> None:
             break
         u = urllib.parse.urlparse(urllib.parse.urljoin(f"{fp.scheme}://{fp.ip}:{fp.port}{path}", nxt))
         if u.hostname and u.hostname != fp.ip:
+            fp.raw["redirect_to"] = u.geturl()       # manda para outro site (ex.: sistema web, não equipamento)
             break
         if u.scheme == "https":
             tls, fp.scheme = True, "https"
@@ -405,6 +406,40 @@ def arp_table() -> dict[str, str]:
 
 
 # --------------------------------------------------------------------------- identificação
+_SERVER_TITLES = re.compile(r"welcome to nginx|apache2? .*default page|it works!|iis windows server|"
+                            r"test page for the|welcome to centos|plesk|cpanel|grafana|zabbix|proxmox|portainer",
+                            re.IGNORECASE)
+_SERVER_HEADER_OS = re.compile(r"\((ubuntu|debian|centos|red hat|rocky|almalinux|fedora|win32|win64)\)",
+                               re.IGNORECASE)
+
+
+def is_system(fp: "Fingerprint") -> bool:
+    """True quando o IP é um servidor/sistema (não um equipamento para automatizar)."""
+    return fp.raw.get("kind") == "sistema"
+
+
+def _looks_like_server(fp: "Fingerprint") -> bool:
+    """Marca servidores e sistemas web (ex.: o próprio OLT Cloud) para não confundir com equipamento."""
+    redirect = fp.raw.get("redirect_to", "")
+    host = (urllib.parse.urlparse(redirect).hostname or "").lower() if redirect else ""
+    reason = ""
+    if "oltcloud" in host or re.search(r"\bOLT Cloud\b", fp.title or ""):
+        fp.vendor, fp.model, reason = "OLT Cloud", "sistema (não é equipamento)", f"redireciona para {host or 'OLT Cloud'}"
+    elif _SERVER_TITLES.search(fp.title or "") or _SERVER_HEADER_OS.search(fp.server or ""):
+        reason = "servidor web (" + (fp.title or fp.server) + ")"
+    if not reason:
+        # outro site (ex.: tplinkwifi.net do TP-Link) pode ser o próprio roteador: só anota
+        if host and not re.fullmatch(r"[\d.]+", host):
+            fp.raw["note"] = f"redireciona para {host}"
+        return False
+    fp.raw["kind"] = "sistema"
+    fp.raw["note"] = reason
+    if not fp.vendor:
+        fp.vendor, fp.model = "Servidor", "não é equipamento"
+    _add_source(fp, "Web")
+    return True
+
+
 def identify(fp: Fingerprint) -> None:
     """Preenche vendor/model/firmware a partir das fontes coletadas.
 
@@ -416,6 +451,8 @@ def identify(fp: Fingerprint) -> None:
     snmp = fp.raw.get("snmp", "")
     visible = fp.raw.get("http_visible", "") or fp.raw.get("http", "")
     page_html = fp.raw.get("http_html", "")
+    if _looks_like_server(fp):
+        return
     if fp.raw.get("probe_operator"):
         fp.raw["note"] = f"Operadora: {fp.raw['probe_operator']}"
 

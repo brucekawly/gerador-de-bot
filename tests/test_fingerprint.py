@@ -64,6 +64,34 @@ class TestIdentify(unittest.TestCase):
         self.assertEqual(fp.vendor, "MikroTik")
         self.assertEqual(fp.model, "RB4011iGS+")
 
+    def test_servers_are_not_devices(self):
+        fp = Fingerprint("10.0.0.11", 80, title="301 Moved Permanently", server="nginx/1.18.0 (Ubuntu)")
+        fp.raw["redirect_to"] = "https://cliente.oltcloud.co/"
+        identify(fp)
+        self.assertTrue(fpm.is_system(fp))
+        self.assertEqual(fp.vendor, "OLT Cloud")
+        self.assertIn("cliente.oltcloud.co", fp.raw["note"])
+        nginx = Fingerprint("10.0.0.13", 80, title="Welcome to nginx!")
+        identify(nginx)
+        self.assertTrue(fpm.is_system(nginx))
+        # TP-Link redireciona para o domínio dele, mas é o roteador
+        tp = Fingerprint("10.0.0.20", 80, title="Opening...")
+        tp.raw["redirect_to"] = "http://tplinkwifi.net/"
+        tp.raw["http_visible"] = "TP-Link Archer C6"
+        identify(tp)
+        self.assertFalse(fpm.is_system(tp))
+        self.assertEqual(tp.vendor, "TP-Link")
+        self.assertIn("tplinkwifi.net", tp.raw["note"])
+
+    def test_redirect_to_other_host_is_recorded(self):
+        srv = serve({"/": (302, {"Location": "https://cliente.oltcloud.co/"}, "")})
+        try:
+            fp = fpm.fingerprint_host("127.0.0.1", srv.server_port, snmp_community=None, use_upnp=False)
+        finally:
+            srv.shutdown()
+        self.assertEqual(fp.raw.get("redirect_to"), "https://cliente.oltcloud.co/")
+        self.assertTrue(fpm.is_system(fp))
+
     def test_unknown(self):
         fp = self.ident(http_visible="Login page")
         self.assertEqual(fp.vendor, "")
